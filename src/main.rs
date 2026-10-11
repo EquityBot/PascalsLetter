@@ -143,6 +143,8 @@ enum Commands {
 
     /// Git commands with compact output
     Git {
+        // Backticks would leak into clap's --help text, so silence rustdoc here instead.
+        #[allow(rustdoc::invalid_html_tags)]
         /// Change to directory before executing (like git -C <path>, can be repeated)
         #[arg(short = 'C', action = clap::ArgAction::Append)]
         directory: Vec<String>,
@@ -974,11 +976,31 @@ enum Commands {
 
     /// Rewrite a raw command to its RTK equivalent (single source of truth for hooks)
     ///
-    /// Exits 0 and prints the rewritten command if supported.
-    /// Exits 1 with no output if the command has no RTK equivalent.
+    /// Exit codes (a hook must handle all four). The rules are Claude Code's
+    /// permission rules, checked against every command in a chain.
     ///
-    /// Used by Claude Code, Gemini CLI, and other LLM hooks:
-    ///   REWRITTEN=$(rtk rewrite "$CMD") || exit 0
+    /// 0 - rewrite printed, allow rules cover every command: the hook may
+    /// auto-allow it. RTK_REWRITE_HOST=openclaw, for a delegate that gates
+    /// commands itself, turns every 3 but an ask rule's into 0, so a hook that
+    /// auto-allows on 0 runs rtk with that variable unset.
+    ///
+    /// 1 - nothing printed, no rewrite (no RTK equivalent, nothing left to
+    /// rewrite, a command excluded in config, or a construct RTK does not
+    /// rewrite such as `$(...)` or a file redirect): run the command unchanged.
+    ///
+    /// 2 - nothing printed, a deny rule matched (checked before anything
+    /// else): defer to the agent's own deny.
+    ///
+    /// 3 - rewrite printed, an ask rule matched or allow rules do not cover
+    /// every command, including when there are no rules at all: use the
+    /// rewrite and defer approval to the host.
+    ///
+    /// Compare the rewrite with the original: a command already in RTK form can
+    /// come back as itself under 0 or 3.
+    ///
+    /// Exit 3 is still a rewrite, so `REWRITTEN=$(rtk rewrite "$CMD") || exit 0` drops it.
+    ///
+    /// See hooks/claude/rtk-rewrite.sh in the RTK repository for reference handling.
     Rewrite {
         /// Raw command to rewrite (e.g. "git status", "cargo test && git push")
         /// Accepts multiple args: `rtk rewrite ls -al` is equivalent to `rtk rewrite "ls -al"`
@@ -1609,6 +1631,7 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
     }
 
     let raw_command = args.join(" ");
+    let tracked_command = core::shell::display_command(&args);
     let error_message = core::utils::strip_ansi(&parse_error.to_string());
 
     // Start timer before execution to capture actual command runtime
@@ -1694,18 +1717,22 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
                 };
 
                 timer.track(
-                    &raw_command,
-                    &format!("rtk:toml {}", raw_command),
+                    &tracked_command,
+                    &format!("rtk:toml {}", tracked_command),
                     &combined_raw,
                     &shown,
                 );
-                core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+                core::tracking::record_parse_failure_silent(&tracked_command, &error_message, true);
 
                 Ok(exit_code)
             }
             Err(e) => {
                 // Command not found — same behaviour as no-TOML path
-                core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
+                core::tracking::record_parse_failure_silent(
+                    &tracked_command,
+                    &error_message,
+                    false,
+                );
                 eprintln!("[rtk: {}]", e);
                 Ok(127)
             }
@@ -1721,14 +1748,21 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
 
         match status {
             Ok(s) => {
-                timer.track_passthrough(&raw_command, &format!("rtk fallback: {}", raw_command));
+                timer.track_passthrough(
+                    &tracked_command,
+                    &format!("rtk fallback: {}", tracked_command),
+                );
 
-                core::tracking::record_parse_failure_silent(&raw_command, &error_message, true);
+                core::tracking::record_parse_failure_silent(&tracked_command, &error_message, true);
 
                 Ok(core::utils::exit_code_from_status(&s, &raw_command))
             }
             Err(e) => {
-                core::tracking::record_parse_failure_silent(&raw_command, &error_message, false);
+                core::tracking::record_parse_failure_silent(
+                    &tracked_command,
+                    &error_message,
+                    false,
+                );
                 // Command not found or other OS error — single message, no duplicate Clap error
                 eprintln!("[rtk: {}]", e);
                 Ok(127)
@@ -1778,6 +1812,15 @@ enum GtCommands {
 /// e.g. `git log --format="%H %s"` → ["git", "log", "--format=%H %s"]
 fn shell_split(input: &str) -> Vec<String> {
     discover::lexer::shell_split(input)
+}
+
+/// The tracked command for `rtk proxy`: the program word is quoted like its
+/// arguments, so the row matches what the fallback records for the same argv.
+fn proxy_label(cmd_name: &str, cmd_args: &[String]) -> String {
+    let words: Vec<&str> = std::iter::once(cmd_name)
+        .chain(cmd_args.iter().map(String::as_str))
+        .collect();
+    core::shell::display_command(&words)
 }
 
 fn build_k8s_namespace_args(namespace: Option<String>, all: bool) -> Vec<String> {
@@ -2946,10 +2989,13 @@ fn run_cli() -> Result<i32> {
                                     cmd.arg(arg);
                                 }
                                 let status = cmd.status().context("Failed to run npx prisma")?;
-                                let args_str = args.join(" ");
+                                let tracked = core::shell::with_args(
+                                    "npx",
+                                    &core::shell::display_args(&args),
+                                );
                                 timer.track_passthrough(
-                                    &format!("npx {}", args_str),
-                                    &format!("rtk npx {} (passthrough)", args_str),
+                                    &tracked,
+                                    &core::tracking::passthrough_label(&tracked),
                                 );
                                 core::utils::exit_code_from_status(&status, "npx prisma")
                             }
@@ -2960,7 +3006,10 @@ fn run_cli() -> Result<i32> {
                             .arg("prisma")
                             .status()
                             .context("Failed to run npx prisma")?;
-                        timer.track_passthrough("npx prisma", "rtk npx prisma (passthrough)");
+                        timer.track_passthrough(
+                            "npx prisma",
+                            &core::tracking::passthrough_label("npx prisma"),
+                        );
                         core::utils::exit_code_from_status(&status, "npx prisma")
                     }
                 }
@@ -3152,7 +3201,7 @@ fn run_cli() -> Result<i32> {
                     None => (
                         core::shell::direct_command(&args)
                             .context("Failed to prepare direct run command")?,
-                        core::shell::display_args(&args),
+                        core::shell::display_command(&args),
                         core::shell::program_name(&args, None).to_string(),
                     ),
                 };
@@ -3375,9 +3424,10 @@ fn run_cli() -> Result<i32> {
             let full_output = format!("{}{}", stdout, stderr);
 
             // Track usage (input = output since no filtering)
+            let label = proxy_label(&cmd_name, &cmd_args);
             timer.track(
-                &format!("{} {}", cmd_name, cmd_args.join(" ")),
-                &format!("rtk proxy {} {}", cmd_name, cmd_args.join(" ")),
+                &label,
+                &format!("rtk proxy {label}"),
                 &full_output,
                 &full_output,
             );
@@ -3505,6 +3555,19 @@ mod tests {
                 .expect("rtk <framework> <path> parses");
             assert!(is_operational_command(&cli.command), "{framework}");
         }
+    }
+
+    #[test]
+    fn proxy_label_quotes_the_program_like_the_fallback() {
+        let argv = vec!["/p/My Tools/run".to_string(), "x".to_string()];
+        assert_eq!(proxy_label(&argv[0], &argv[1..]), "'/p/My Tools/run' x");
+        // run_fallback records display_command over the whole argv.
+        assert_eq!(
+            proxy_label(&argv[0], &argv[1..]),
+            core::shell::display_command(&argv)
+        );
+        assert_eq!(proxy_label("echo", &[]), "echo");
+        assert_eq!(proxy_label("FOO=1", &["x".to_string()]), "'FOO=1' x");
     }
 
     #[test]
@@ -4325,6 +4388,27 @@ mod tests {
                 _ => panic!("expected Rewrite command"),
             }
         }
+    }
+
+    #[test]
+    fn test_rewrite_help_documents_each_exit_code() {
+        use clap::CommandFactory;
+
+        let help = Cli::command()
+            .find_subcommand_mut("rewrite")
+            .expect("rewrite subcommand should exist")
+            .render_long_help()
+            .to_string();
+
+        // clap joins consecutive doc lines into one paragraph, so each code
+        // needs its own paragraph to render on its own line.
+        for code in 0..=3 {
+            assert!(
+                help.contains(&format!("\n\n{code} - ")),
+                "rewrite help should give exit {code} its own paragraph:\n{help}"
+            );
+        }
+        assert!(help.contains("RTK_REWRITE_HOST"), "{help}");
     }
 
     #[test]

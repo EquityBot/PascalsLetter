@@ -614,7 +614,7 @@ fn repo_with_a_large_blob() -> tempfile::TempDir {
     dir
 }
 
-const BLOB_HINT: &str = "[see remaining: rtk proxy git show 'HEAD:big.txt' | tail -n +";
+const BLOB_HINT: &str = "[see remaining: rtk proxy git show HEAD:big.txt | tail -n +";
 
 #[test]
 fn git_show_cluster_flag_value_is_not_mistaken_for_the_blob_object() {
