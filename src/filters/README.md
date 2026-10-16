@@ -72,7 +72,7 @@ How a `.toml` file goes from contributor → binary → filtered output.
 
 ```mermaid
 flowchart TD
-%%{init: {"theme": "base", "look": "classic", "themeVariables": {"background": "#000000", "primaryColor": "#66023C", "primaryTextColor": "#FFFFF0", "primaryBorderColor": "#FFFFF0", "lineColor": "#000000", "textColor": "#FFFFF0", "edgeLabelBackground": "#000000", "clusterBkg": "#000000", "clusterBorder": "#FFFFF0", "titleColor": "#FFFFF0"}, "themeCSS": ".flowchart-link, .relationshipLine, marker path { filter: drop-shadow(0px 1px 0px #FFFFF0) drop-shadow(0px -1px 0px #FFFFF0) drop-shadow(1px 0px 0px #FFFFF0) drop-shadow(-1px 0px 0px #FFFFF0); }"}}%%
+%%{init: {"theme": "base", "look": "classic", "themeVariables": {"background": "#000000", "primaryColor": "#66023C", "primaryTextColor": "#FFFFF0", "primaryBorderColor": "#FFFFF0", "lineColor": "#FFD32A", "textColor": "#FFFFF0", "edgeLabelBackground": "#000000", "clusterBkg": "#000000", "clusterBorder": "#9B7735", "titleColor": "#FFFFF0"}}}%%
     A[["src/filters/my-tool.toml\n(new file)"]] --> B
 
     subgraph BUILD ["cargo build"]
@@ -100,13 +100,17 @@ flowchart TD
     G --> H & J & L & R
     style G fill:#990024,stroke:#FFFFF0,stroke-width:2px,color:#FFFFF0
     style W fill:#990024,stroke:#FFFFF0,stroke-width:2px,color:#FFFFF0
+    classDef external fill:#745EB1,stroke:#FFFFF0,stroke-width:2px,color:#FFFFF0
+    class A external
+    classDef decision fill:#E7162F,stroke:#FFFFF0,stroke-width:2px,color:#FFFFF0
+    class C,S decision
 ```
 
 ## Filter lookup priority
 
 ```mermaid
 flowchart LR
-%%{init: {"theme": "base", "look": "classic", "themeVariables": {"background": "#000000", "primaryColor": "#66023C", "primaryTextColor": "#FFFFF0", "primaryBorderColor": "#FFFFF0", "lineColor": "#000000", "textColor": "#FFFFF0", "edgeLabelBackground": "#000000", "clusterBkg": "#000000", "clusterBorder": "#FFFFF0", "titleColor": "#FFFFF0"}, "themeCSS": ".flowchart-link, .relationshipLine, marker path { filter: drop-shadow(0px 1px 0px #FFFFF0) drop-shadow(0px -1px 0px #FFFFF0) drop-shadow(1px 0px 0px #FFFFF0) drop-shadow(-1px 0px 0px #FFFFF0); }"}}%%
+%%{init: {"theme": "base", "look": "classic", "themeVariables": {"background": "#000000", "primaryColor": "#66023C", "primaryTextColor": "#FFFFF0", "primaryBorderColor": "#FFFFF0", "lineColor": "#FFD32A", "textColor": "#FFFFF0", "edgeLabelBackground": "#000000", "clusterBkg": "#000000", "clusterBorder": "#9B7735", "titleColor": "#FFFFF0"}}}%%
     CMD["rtk my-tool args"] --> P1
     P1{"1. .rtk/filters.toml\n(project-local)"}
     P1 -->|"match"| WIN["apply filter"]
@@ -118,6 +122,10 @@ flowchart LR
     P3 -->|"match"| WIN
     P3 -->|"no match"| P4[["exec raw (passthrough)"]]
     style WIN fill:#990024,stroke:#FFFFF0,stroke-width:2px,color:#FFFFF0
+    classDef external fill:#745EB1,stroke:#FFFFF0,stroke-width:2px,color:#FFFFF0
+    class CMD external
+    classDef decision fill:#E7162F,stroke:#FFFFF0,stroke-width:2px,color:#FFFFF0
+    class P1,P2,P3 decision
 ```
 
 First match wins. A project filter with the same name as a built-in shadows the built-in and triggers a warning:
