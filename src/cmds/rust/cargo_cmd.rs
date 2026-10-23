@@ -1277,10 +1277,11 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
     result.trim().to_string()
 }
 
-/// Filter cargo clippy output - show full error blocks, group warnings by lint rule
 /// Grouping key for a diagnostic headline, given the text after `error`/`warning`:
 /// a leading code (`[E0308]: ...`), else a trailing lint tag (`... [unused_variables]`),
 /// else the message. Brackets inside the message, as in `&[_]`, are not a tag.
+/// A tag must look like a lint name (lower case, with `_` or `::`), because message
+/// text can end in brackets too, as in a deprecation note `prefer [u8]`.
 fn clippy_rule(rest: &str) -> String {
     if let Some((code, _)) = rest.strip_prefix('[').and_then(|r| r.split_once(']')) {
         return code.to_string();
@@ -1290,15 +1291,19 @@ fn clippy_rule(rest: &str) -> String {
         .strip_suffix(']')
         .and_then(|m| m.rsplit_once(" ["))
         .map(|(_, tag)| tag)
-        .filter(|tag| {
-            tag.chars().any(|c| c.is_ascii_alphabetic())
-                && tag
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
-        });
+        .filter(|tag| is_lint_name(tag));
     tag.unwrap_or(message).to_string()
 }
 
+fn is_lint_name(tag: &str) -> bool {
+    tag.starts_with(|c: char| c.is_ascii_lowercase())
+        && (tag.contains('_') || tag.contains("::"))
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == ':')
+}
+
+/// Filter cargo clippy output - show full error blocks, group warnings by lint rule
 fn filter_cargo_clippy(output: &str) -> String {
     let mut by_rule: HashMap<String, Vec<String>> = HashMap::new();
     let mut error_count = 0;
@@ -1890,8 +1895,32 @@ warning: `rtk` (bin) generated 2 warnings
 "#;
         let result = filter_cargo_clippy(output);
         assert!(result.contains("0 errors, 2 warnings"));
-        assert!(result.contains("unused_variables"));
-        assert!(result.contains("clippy::too_many_arguments"));
+        assert!(
+            result.contains("  unused_variables (1x)"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("  clippy::too_many_arguments (1x)"),
+            "got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_clippy_groups_same_tag() {
+        let output = r#"warning: unused variable: `x` [unused_variables]
+ --> src/a.rs:1:9
+
+warning: unused variable: `y` [unused_variables]
+ --> src/b.rs:2:9
+"#;
+        let result = filter_cargo_clippy(output);
+        assert!(
+            result.contains("  unused_variables (2x)"),
+            "got: {}",
+            result
+        );
     }
 
     #[test]
@@ -1939,6 +1968,17 @@ warning: `demo` (lib) generated 2 warnings
         );
         assert_eq!(clippy_rule(": slice `&[_]`"), "slice `&[_]`");
         assert_eq!(clippy_rule(": ends in a slot [_]"), "ends in a slot [_]");
+        assert_eq!(
+            clippy_rule(": use of deprecated function `old`: prefer [u8]"),
+            "use of deprecated function `old`: prefer [u8]"
+        );
+        assert_eq!(clippy_rule(": a] b [c"), "a] b [c");
+    }
+
+    #[test]
+    fn test_filter_cargo_clippy_reversed_brackets_do_not_panic() {
+        let result = filter_cargo_clippy("warning: a] b [c\n --> src/lib.rs:1:1\n");
+        assert!(result.contains("  a] b [c (1x)"), "got: {}", result);
     }
 
     #[test]
@@ -1980,6 +2020,7 @@ error: aborting due to 1 previous error
             result
         );
         assert!(result.contains("src/main.rs:10:5"), "got: {}", result);
+        assert!(result.contains("  E0308 (1x)"), "got: {}", result);
         assert!(
             result.contains("expected `i32`, found `&str`"),
             "got: {}",
