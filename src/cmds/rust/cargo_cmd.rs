@@ -1278,6 +1278,27 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
 }
 
 /// Filter cargo clippy output - show full error blocks, group warnings by lint rule
+/// Grouping key for a diagnostic headline, given the text after `error`/`warning`:
+/// a leading code (`[E0308]: ...`), else a trailing lint tag (`... [unused_variables]`),
+/// else the message. Brackets inside the message, as in `&[_]`, are not a tag.
+fn clippy_rule(rest: &str) -> String {
+    if let Some((code, _)) = rest.strip_prefix('[').and_then(|r| r.split_once(']')) {
+        return code.to_string();
+    }
+    let message = rest.strip_prefix(": ").unwrap_or(rest);
+    let tag = message
+        .strip_suffix(']')
+        .and_then(|m| m.rsplit_once(" ["))
+        .map(|(_, tag)| tag)
+        .filter(|tag| {
+            tag.chars().any(|c| c.is_ascii_alphabetic())
+                && tag
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+        });
+    tag.unwrap_or(message).to_string()
+}
+
 fn filter_cargo_clippy(output: &str) -> String {
     let mut by_rule: HashMap<String, Vec<String>> = HashMap::new();
     let mut error_count = 0;
@@ -1332,21 +1353,8 @@ fn filter_cargo_clippy(output: &str) -> String {
                 warning_count += 1;
             }
 
-            // Extract rule/error-code from brackets for warning grouping
-            current_rule = if let Some(bracket_start) = line.rfind('[') {
-                if let Some(bracket_end) = line.rfind(']') {
-                    line[bracket_start + 1..bracket_end].to_string()
-                } else {
-                    line.to_string()
-                }
-            } else {
-                let prefix = if is_error_line {
-                    "error: "
-                } else {
-                    "warning: "
-                };
-                line.strip_prefix(prefix).unwrap_or(line).to_string()
-            };
+            let level = if is_error_line { "error" } else { "warning" };
+            current_rule = clippy_rule(&line[level.len()..]);
         } else if line.trim_start().starts_with("--> ") {
             let location = line.trim_start().trim_start_matches("--> ").to_string();
             if !current_rule.is_empty() {
@@ -1884,6 +1892,53 @@ warning: `rtk` (bin) generated 2 warnings
         assert!(result.contains("0 errors, 2 warnings"));
         assert!(result.contains("unused_variables"));
         assert!(result.contains("clippy::too_many_arguments"));
+    }
+
+    #[test]
+    fn test_filter_cargo_clippy_brackets_in_message_are_not_a_rule() {
+        let output = r#"    Checking demo v0.1.0
+warning: writing `&Vec` instead of `&[_]` involves a new object where a slice will do
+ --> src\lib.rs:4:13
+  |
+4 | pub fn b(v: &Vec<i32>) -> usize {
+  |             ^^^^^^^^^ help: change this to: `&[i32]`
+
+warning: indexing into `v[0]` may panic
+ --> src\lib.rs:9:5
+  |
+
+warning: `demo` (lib) generated 2 warnings
+"#;
+        let result = filter_cargo_clippy(output);
+        assert!(result.contains("0 errors, 2 warnings"), "got: {}", result);
+        assert!(
+            result.contains(
+                "writing `&Vec` instead of `&[_]` involves a new object where a slice will do (1x)"
+            ),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("indexing into `v[0]` may panic (1x)"),
+            "got: {}",
+            result
+        );
+        assert!(!result.contains("  _ ("), "got: {}", result);
+    }
+
+    #[test]
+    fn test_clippy_rule_keys() {
+        assert_eq!(clippy_rule("[E0308]: mismatched types"), "E0308");
+        assert_eq!(
+            clippy_rule(": unused variable: `x` [unused_variables]"),
+            "unused_variables"
+        );
+        assert_eq!(
+            clippy_rule(": too many [clippy::too_many_arguments]"),
+            "clippy::too_many_arguments"
+        );
+        assert_eq!(clippy_rule(": slice `&[_]`"), "slice `&[_]`");
+        assert_eq!(clippy_rule(": ends in a slot [_]"), "ends in a slot [_]");
     }
 
     #[test]
