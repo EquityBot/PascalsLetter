@@ -2,9 +2,13 @@
   <img src="https://avatars.githubusercontent.com/u/258253854?v=4" alt="RTK - Rust Token Killer" width="500">
 </p>
 
+<div align="center">
+
 **Fork status**
 
 [![Fork code quality](https://img.shields.io/codacy/grade/68c5d91770634f3b86493583fd8eada6/develop?style=flat&labelColor=000000)](https://app.codacy.com/gh/ryanduguid/rtk/dashboard)
+
+</div>
 
 <p align="center">
   <strong>High-performance CLI proxy that cuts up to 90% of the bash output your agent reads</strong>
