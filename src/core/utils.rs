@@ -509,6 +509,27 @@ pub fn quote_arg_for_child(arg: &str) -> String {
     out
 }
 
+/// Encode one argument for an MSYS/Cygwin child's raw command line.
+///
+/// The MSYS runtime rebuilds argv with its own rules, not MSVC's: an unquoted
+/// argument is globbed, brace-expanded and stripped of `\` and `'` (`#\[x`
+/// reaches grep as `#[x`, `*.rs` as the matching file names, `~` as the home
+/// directory), and inside double quotes `\\` collapses to `\`. So always quote,
+/// and double every backslash rather than only the runs before a quote.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn quote_arg_for_msys(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    for ch in arg.chars() {
+        if ch == '\\' || ch == '"' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
+}
+
 /// Pass caller-supplied arguments to a child so that MSYS/Cygwin children on
 /// Windows receive them intact.
 ///
@@ -547,14 +568,32 @@ impl ChildArgExt for Command {
 /// bypass the escaping std applies for them.
 #[cfg(windows)]
 fn push_child_arg(cmd: &mut Command, arg: &OsStr) {
+    use std::os::windows::process::CommandExt;
     match arg.to_str() {
-        Some(s) if s.contains('"') && !is_batch_program(cmd) => {
-            std::os::windows::process::CommandExt::raw_arg(cmd, quote_arg_for_child(s));
+        _ if is_batch_program(cmd) => {
+            cmd.arg(arg);
+        }
+        Some(s) if is_msys_program(cmd) => {
+            cmd.raw_arg(quote_arg_for_msys(s));
+        }
+        Some(s) if s.contains('"') => {
+            cmd.raw_arg(quote_arg_for_child(s));
         }
         _ => {
             cmd.arg(arg);
         }
     }
+}
+
+/// An MSYS/Cygwin program ships beside its runtime DLL (Git for Windows'
+/// `usr\bin\grep.exe` beside `msys-2.0.dll`). Native builds such as rg, git and
+/// cargo do not, and keep std's MSVC encoding.
+#[cfg(windows)]
+fn is_msys_program(cmd: &Command) -> bool {
+    std::path::Path::new(cmd.get_program())
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .is_some_and(|dir| dir.join("msys-2.0.dll").is_file() || dir.join("cygwin1.dll").is_file())
 }
 
 #[cfg(windows)]
@@ -1301,6 +1340,49 @@ mod tests {
         cmd.child_arg(r#""type""#);
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, [r#""type""#]);
+    }
+
+    #[test]
+    fn test_quote_arg_for_msys_doubles_every_backslash() {
+        assert_eq!(quote_arg_for_msys(r"#\[ignore"), r##""#\\[ignore""##);
+        assert_eq!(quote_arg_for_msys(r"C:\x\"), r#""C:\\x\\""#);
+        assert_eq!(quote_arg_for_msys(r#"a\"b"#), r#""a\\\"b""#);
+    }
+
+    #[test]
+    fn test_quote_arg_for_msys_wraps_glob_and_quote_characters() {
+        assert_eq!(quote_arg_for_msys("*.rs"), r#""*.rs""#);
+        assert_eq!(quote_arg_for_msys("don't"), r#""don't""#);
+        assert_eq!(quote_arg_for_msys(""), r#""""#);
+    }
+
+    /// End to end through a real MSYS binary, where one is installed.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_child_arg_round_trips_through_an_msys_program() {
+        let Ok(printf) = resolve_binary("printf") else {
+            return;
+        };
+        let mut cmd = Command::new(&printf);
+        if !is_msys_program(&cmd) {
+            return;
+        }
+        let args = [
+            r"#\[ignore",
+            r"a\\b",
+            r"C:\x\",
+            r#"a\"b"#,
+            "*",
+            "{a,b}",
+            "don't",
+            "~",
+            "@resp",
+            "",
+        ];
+        cmd.child_arg("%s\\n").child_args(args);
+        let out = cmd.output().expect("printf runs");
+        let got = String::from_utf8(out.stdout).unwrap();
+        assert_eq!(got.lines().collect::<Vec<_>>(), args);
     }
 
     // ===== Windows-specific PATHEXT resolution tests (issue #212) =====
