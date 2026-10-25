@@ -805,11 +805,7 @@ pub fn run(
         None
     };
 
-    let locate = match_locator(
-        &patterns,
-        pattern_dialect(engine, args),
-        ignores_case(engine, args, &patterns),
-    );
+    let locate = locator_for(engine, args, &patterns);
     let mut by_file: HashMap<String, Vec<(usize, bool, String)>> = HashMap::new();
     for line in raw_output.lines() {
         let Some((file, line_num, is_match, content)) = parse_match_line(line) else {
@@ -1178,16 +1174,24 @@ fn clean_line(
     // text, which misses every real regex (`fn\s+run`) and so cut away the very match the
     // agent searched for. The match offset is taken on the line itself: lowercasing first
     // can change its length and pushed the window past the end of the line.
-    let Some(char_pos) = locate
+    // No trustworthy position (PCRE, `-w`, a mid-pattern BRE `^`), or a match too long for
+    // the window: a clip could cut away the match, so the line stays whole.
+    let Some((match_start, match_end)) = locate
         .and_then(|re| re.find(trimmed))
-        .map(|m| trimmed[..m.start()].chars().count())
+        .map(|m| {
+            let start = trimmed[..m.start()].chars().count();
+            (start, start + m.as_str().chars().count())
+        })
+        .filter(|(start, end)| end - start <= max_len)
     else {
-        // No trustworthy position (a PCRE-only construct, a mid-pattern BRE `^`): a clip
-        // could cut away the match, so the line stays whole.
         return trimmed.to_string();
     };
 
-    let start = char_pos.saturating_sub(max_len / 3).min(char_len - max_len);
+    // The whole match inside the window, a third of it ahead of the match where room allows.
+    let start = match_start
+        .saturating_sub(max_len / 3)
+        .max(match_end.saturating_sub(max_len))
+        .min(char_len - max_len);
     let end = start + max_len;
     let slice: String = trimmed.chars().skip(start).take(max_len).collect();
     if start > 0 && end < char_len {
@@ -1205,8 +1209,10 @@ enum PatternDialect {
     Fixed,
     /// grep's default BRE, where `\+ \? \| \( \) \{ \}` are the operators.
     Basic,
-    /// rg's Rust regex, or grep's ERE and PCRE, close enough to it to place a window.
+    /// rg's Rust regex, or grep's ERE, close enough to it to place a window.
     Regex,
+    /// grep -P and rg's PCRE2 engine: lookaround and other syntax Rust's regex lacks.
+    Pcre,
 }
 
 fn pattern_dialect<T: AsRef<str>>(engine: Engine, args: &[T]) -> PatternDialect {
@@ -1222,37 +1228,44 @@ fn pattern_dialect<T: AsRef<str>>(engine: Engine, args: &[T]) -> PatternDialect 
             }
             (Engine::Grep, TokenKind::Short, "G")
             | (Engine::Grep, TokenKind::Long, "basic-regexp") => PatternDialect::Basic,
-            (Engine::Grep, TokenKind::Short, "E" | "P")
-            | (Engine::Grep, TokenKind::Long, "extended-regexp" | "perl-regexp")
-            | (Engine::Rg, TokenKind::Long, "no-fixed-strings") => PatternDialect::Regex,
+            (Engine::Grep, TokenKind::Short, "E")
+            | (Engine::Grep, TokenKind::Long, "extended-regexp")
+            | (Engine::Rg, TokenKind::Long, "no-fixed-strings" | "no-pcre2") => {
+                PatternDialect::Regex
+            }
+            (Engine::Grep, TokenKind::Short, "P")
+            | (Engine::Grep, TokenKind::Long, "perl-regexp")
+            | (Engine::Rg, TokenKind::Short, "P")
+            | (Engine::Rg, TokenKind::Long, "pcre2") => PatternDialect::Pcre,
+            (Engine::Rg, TokenKind::Long, "engine") => {
+                match t.attached.or_else(|| t.value(&tokens)) {
+                    Some("default") => PatternDialect::Regex,
+                    _ => PatternDialect::Pcre,
+                }
+            }
             _ => dialect,
         };
     }
     dialect
 }
 
-/// Whether the engine ignores case, by the user's own flags (the last one wins). Unknown
-/// settings, such as an rg config file's `--smart-case`, count as case-sensitive: a locator
+/// Whether the engine ignores case, by the user's own flags (the last one wins). Smart case
+/// and unknown settings, such as an rg config file's, count as case-sensitive: a locator
 /// stricter than the engine finds a real match or none, never a lookalike.
-fn ignores_case<T: AsRef<str>>(engine: Engine, args: &[T], patterns: &[String]) -> bool {
+fn ignores_case<T: AsRef<str>>(engine: Engine, args: &[T]) -> bool {
     let tokens = tokenize_search_args(args, engine);
-    let (mut ignore, mut smart) = (false, false);
+    let mut ignore = false;
     for t in arg_tokenizer::before_dashdash(&tokens) {
         match (engine, t.kind, t.text) {
-            (_, TokenKind::Short, "i") | (_, TokenKind::Long, "ignore-case") => {
-                (ignore, smart) = (true, false)
-            }
-            (Engine::Grep, TokenKind::Short, "y") => (ignore, smart) = (true, false),
+            (_, TokenKind::Short, "i") | (_, TokenKind::Long, "ignore-case") => ignore = true,
+            (Engine::Grep, TokenKind::Short, "y") => ignore = true,
             (Engine::Grep, TokenKind::Long, "no-ignore-case")
-            | (Engine::Rg, TokenKind::Short, "s")
-            | (Engine::Rg, TokenKind::Long, "case-sensitive") => (ignore, smart) = (false, false),
-            (Engine::Rg, TokenKind::Short, "S") | (Engine::Rg, TokenKind::Long, "smart-case") => {
-                (ignore, smart) = (false, true)
-            }
+            | (Engine::Rg, TokenKind::Short, "s" | "S")
+            | (Engine::Rg, TokenKind::Long, "case-sensitive" | "smart-case") => ignore = false,
             _ => {}
         }
     }
-    ignore || smart && !patterns.iter().any(|p| p.chars().any(char::is_uppercase))
+    ignore
 }
 
 /// A BRE as the equivalent Rust regex: the escaped and bare forms of `+ ? | ( ) { }` swap.
@@ -1300,12 +1313,31 @@ fn match_locator(patterns: &[String], dialect: PatternDialect, ignore_case: bool
     if pieces.is_empty() {
         return None;
     }
+    // A pattern Rust's regex rejects is not located at all: its literal spelling is no match.
     match dialect {
-        PatternDialect::Fixed => None,
+        PatternDialect::Fixed => build(&|p| regex::escape(p)),
         PatternDialect::Basic => build(&bre_to_regex),
         PatternDialect::Regex => build(&|p| p.to_string()),
+        PatternDialect::Pcre => None,
     }
-    .or_else(|| build(&|p| regex::escape(p)))
+}
+
+/// The locator for this search, or none where its matches could differ from the engine's:
+/// PCRE, and `-w`, whose word boundaries the locator does not model.
+fn locator_for<T: AsRef<str>>(engine: Engine, args: &[T], patterns: &[String]) -> Option<Regex> {
+    let tokens = tokenize_search_args(args, engine);
+    let whole_words = arg_tokenizer::before_dashdash(&tokens).iter().any(|t| {
+        (t.kind == TokenKind::Short && t.text == "w")
+            || (t.kind == TokenKind::Long && t.text == "word-regexp")
+    });
+    if whole_words {
+        return None;
+    }
+    match_locator(
+        patterns,
+        pattern_dialect(engine, args),
+        ignores_case(engine, args),
+    )
 }
 
 fn compact_path(path: &str) -> String {
@@ -1422,10 +1454,29 @@ mod tests {
     }
 
     #[test]
-    fn test_match_locator_falls_back_to_a_literal() {
-        // In grep's BRE `(` is a literal; Rust's regex rejects it unclosed.
-        let re = locator("a(b").expect("literal fallback");
-        assert!(re.is_match("xa(by"));
+    fn test_match_locator_gives_up_on_a_pattern_rust_rejects() {
+        // Its literal spelling is no match the engine would make, so nothing is located.
+        assert!(locator("a(b").is_none());
+        assert!(match_locator(&["(?<=foo)bar".into()], PatternDialect::Pcre, false).is_none());
+    }
+
+    #[test]
+    fn test_clean_line_keeps_the_whole_match_in_the_window() {
+        let line = format!("{} needle {}", "f".repeat(240), "g".repeat(240));
+        let re = locator(".*needle").unwrap();
+        // The match spans 247 chars, more than the window: the line stays whole.
+        assert_eq!(clean_line(&line, 160, None, Some(&re)), line);
+        let re = locator("f{100}needle").unwrap();
+        let clipped = clean_line(&line, 160, None, Some(&re));
+        assert!(clipped.contains("needle"), "{clipped}");
+    }
+
+    #[test]
+    fn test_locator_for_skips_whole_word_searches() {
+        let patterns = ["needle".to_string()];
+        assert!(locator_for(Engine::Grep, &["-w", "needle"], &patterns).is_none());
+        assert!(locator_for(Engine::Rg, &["--word-regexp", "needle"], &patterns).is_none());
+        assert!(locator_for(Engine::Rg, &["needle"], &patterns).is_some());
     }
 
     #[test]
@@ -1446,21 +1497,27 @@ mod tests {
         assert_eq!(rg(&["-F", "--no-fixed-strings", "x"]), Regex);
         // rg's -E is --encoding, not a pattern mode.
         assert_eq!(rg(&["-F", "-E", "utf8", "x"]), Fixed);
+        assert_eq!(grep(&["-P", "x"]), Pcre);
+        assert_eq!(rg(&["--pcre2", "x"]), Pcre);
+        assert_eq!(rg(&["-P", "--no-pcre2", "x"]), Regex);
+        assert_eq!(rg(&["--engine", "auto", "x"]), Pcre);
+        assert_eq!(rg(&["--engine=default", "x"]), Regex);
     }
 
     #[test]
     fn test_ignores_case_only_when_the_flags_say_so() {
-        let grep = |args: &[&str], p: &str| ignores_case(Engine::Grep, args, &[p.to_string()]);
-        let rg = |args: &[&str], p: &str| ignores_case(Engine::Rg, args, &[p.to_string()]);
-        assert!(!grep(&["x"], "x"));
-        assert!(grep(&["-ri", "x"], "x"));
-        assert!(grep(&["-y", "x"], "x"));
-        assert!(!grep(&["-i", "--no-ignore-case", "x"], "x"));
-        assert!(!grep(&["--", "-i"], "x"));
-        assert!(!rg(&["x"], "x"));
-        assert!(rg(&["-S", "x"], "x"));
-        assert!(!rg(&["-S", "X"], "X"));
-        assert!(!rg(&["-i", "-s", "x"], "x"));
+        let grep = |args: &[&str]| ignores_case(Engine::Grep, args);
+        let rg = |args: &[&str]| ignores_case(Engine::Rg, args);
+        assert!(!grep(&["x"]));
+        assert!(grep(&["-ri", "x"]));
+        assert!(grep(&["-y", "x"]));
+        assert!(!grep(&["-i", "--no-ignore-case", "x"]));
+        assert!(!grep(&["--", "-i"]));
+        assert!(!rg(&["x"]));
+        // Smart case is decided on rg's parsed regex (`\x41` is uppercase); not modelled.
+        assert!(!rg(&["-S", "x"]));
+        assert!(!rg(&["-i", "-S", "x"]));
+        assert!(!rg(&["-i", "-s", "x"]));
     }
 
     #[test]

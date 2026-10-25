@@ -175,4 +175,34 @@ fn a_pcre_lookbehind_keeps_its_match() {
     }
     let line = |i| format!("{} foobar {} {i}", "f".repeat(240), "g".repeat(240));
     assert_every_clip_keeps(&["rg", "--pcre2", "(?<=foo)bar"], line, "foobar");
+    // The pattern's own spelling early in the line is no PCRE match.
+    let decoy = |i| {
+        format!(
+            "(?<=foo)bar {} foobar {} {i}",
+            "f".repeat(240),
+            "g".repeat(240)
+        )
+    };
+    assert_every_clip_keeps(&["rg", "--pcre2", "(?<=foo)bar"], decoy, "foobar");
+}
+
+#[test]
+fn a_smart_case_clip_keeps_an_escaped_uppercase_match() {
+    // rg reads `\x41` as an uppercase literal, so -S searches case-sensitively for `A`.
+    let line = |i| format!("a {} A {} {i}", "f".repeat(240), "g".repeat(240));
+    assert_every_clip_keeps(&["rg", "-S", r"\x41"], line, " A ");
+}
+
+#[test]
+fn a_whole_word_clip_keeps_the_standalone_word() {
+    let line = |i| format!("needles {} needle {} {i}", "f".repeat(240), "g".repeat(240));
+    assert_every_clip_keeps(&["grep", "-w", "needle"], line, " needle ");
+    assert_every_clip_keeps(&["rg", "-w", "needle"], line, " needle ");
+}
+
+#[test]
+fn a_match_longer_than_the_window_keeps_its_end() {
+    let line = |i| format!("{} needle {} {i}", "f".repeat(240), "g".repeat(240));
+    assert_every_clip_keeps(&["rg", ".*needle"], line, "needle");
+    assert_every_clip_keeps(&["grep", ".*needle"], line, "needle");
 }
