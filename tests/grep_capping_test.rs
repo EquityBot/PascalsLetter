@@ -129,6 +129,16 @@ fn grouped_output_is_kept_when_only_it_fits_the_agent_cap() {
 
 /// 400 long lines force the grouped form; every shown line must still hold `wanted`.
 fn assert_every_clip_keeps(args: &[&str], line: impl Fn(usize) -> String, wanted: &str) {
+    assert_every_clip_keeps_in(&[], args, line, wanted);
+}
+
+/// [`assert_every_clip_keeps`] with extra environment, such as a locale.
+fn assert_every_clip_keeps_in(
+    env: &[(&str, &str)],
+    args: &[&str],
+    line: impl Fn(usize) -> String,
+    wanted: &str,
+) {
     let dir = tempfile::tempdir().expect("test setup");
     let body: String = (0..400).map(|i| line(i) + "\n").collect();
     std::fs::write(dir.path().join("long.txt"), body).expect("test setup");
@@ -136,6 +146,7 @@ fn assert_every_clip_keeps(args: &[&str], line: impl Fn(usize) -> String, wanted
     let out = common::rtk_command()
         .args(args)
         .arg("long.txt")
+        .envs(env.iter().copied())
         .current_dir(dir.path())
         .output()
         .expect("rtk");
@@ -216,6 +227,42 @@ fn a_gnu_only_bre_escape_keeps_its_match() {
 }
 
 #[test]
+fn a_mid_pattern_bre_caret_keeps_its_match() {
+    // GNU reads this `^` as a literal; Rust would anchor `foo` at the line start.
+    let line = |i| format!("foo {} ^foo {} {i}", "f".repeat(240), "g".repeat(240));
+    assert_every_clip_keeps(&["grep", r"a\?^foo"], line, "^foo");
+}
+
+#[test]
+fn a_c_locale_space_class_keeps_its_match() {
+    // In the C locale grep's `\s` is ASCII; an EM SPACE before `needle` is no match (the
+    // leading `x` keeps it from being trimmed off the line).
+    let line = |i| {
+        format!(
+            "x\u{2003}needle {} needle {} {i}",
+            "f".repeat(240),
+            "g".repeat(240)
+        )
+    };
+    let c = [("LC_ALL", "C")];
+    assert_every_clip_keeps_in(&c, &["grep", r"\sneedle"], line, "f needle g");
+}
+
+#[test]
+fn a_utf8_negated_class_keeps_its_match() {
+    // In a UTF-8 locale `é` is alphabetic, so `[^[:alpha:]]needle` matches only `5needle`.
+    let line = |i| {
+        format!(
+            "éneedle {} 5needle {} {i}",
+            "f".repeat(240),
+            "g".repeat(240)
+        )
+    };
+    let utf8 = [("LC_ALL", "C.UTF-8")];
+    assert_every_clip_keeps_in(&utf8, &["grep", "[^[:alpha:]]needle"], line, "5needle");
+}
+
+#[test]
 fn a_whole_line_match_keeps_the_line() {
     // `foo` alone is no -x match; the line matches only as a whole.
     let long = format!("foo {} {}", "f".repeat(240), "g".repeat(240));
@@ -249,7 +296,10 @@ fn a_very_long_unlocated_line_is_cut_and_says_so() {
     let shown: Vec<&str> = stdout.lines().filter(|l| l.contains("fff")).collect();
     assert!(!shown.is_empty(), "{stdout:.300}");
     for l in shown {
-        assert!(l.ends_with("chars; match not shown]"), "{l:.300}");
+        assert!(
+            l.ends_with("chars cut; match position unknown]"),
+            "{l:.300}"
+        );
     }
 }
 

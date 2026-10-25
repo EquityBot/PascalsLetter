@@ -597,6 +597,11 @@ fn a_child_keeps_none_of_the_shell_settings() {
     }
 }
 
+/// Variables rtk reads only to read text as the engine it runs does, which inherits the
+/// same value: the locale grep matches in. A child keeps them, as its tools do, so a test
+/// pins them for both or neither.
+const MIRRORED: [&str; 3] = ["LC_ALL", "LC_CTYPE", "LANG"];
+
 /// `user_env` keeps a test on its own side, but a spawned rtk is built without
 /// `cfg(test)` and obeys whatever it inherits. Every variable rtk reads must
 /// therefore be pinned — to a fixed value, or a path inside the scratch
@@ -636,6 +641,7 @@ fn every_variable_rtk_reads_is_redirected_for_a_child() {
     let envs: Vec<_> = cmd.get_envs().collect();
     let mut leaks: Vec<_> = read
         .iter()
+        .filter(|(_, name)| !MIRRORED.contains(&name.as_ref()))
         .filter(|(_, name)| {
             // Windows looks names up regardless of case.
             let entry = envs
