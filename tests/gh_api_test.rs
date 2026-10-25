@@ -129,3 +129,29 @@ fn links_stay_when_the_response_cannot_be_stored() {
     assert_eq!(out.stdout, LINKED, "filtered without a stored original");
     assert!(!String::from_utf8_lossy(&out.stderr).contains("dropped"));
 }
+
+#[test]
+fn links_stay_when_the_recall_store_cannot_be_written() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fake_gh(dir.path(), LINKED, 0);
+    // A store path under a regular file can be neither created nor opened.
+    let blocker = dir.path().join("not-a-dir");
+    fs::write(&blocker, b"").expect("write blocker");
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let path = format!(
+        "{}{sep}{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = common::rtk_command()
+        .args(["gh", "api", "repos/los-pollos/hermanos"])
+        .env("PATH", path)
+        .env("RTK_RECALL_DB", blocker.join("recall.db"))
+        .output()
+        .expect("run rtk");
+
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.stdout, LINKED, "filtered although nothing was stored");
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("dropped"));
+}
