@@ -749,12 +749,12 @@ pub fn run(
             ),
         );
         print_efficiency_meter(summary.avg_savings_pct);
-        if summary.oversized_excluded > 0 {
+        if summary.oversized_capped > 0 {
             print_kpi(
-                "Excluded",
+                "Capped",
                 format!(
-                    "{} oversized outputs (input past the ~30k-char agent cap)",
-                    summary.oversized_excluded
+                    "{} outputs past the ~30k-char agent cap, counted at the cap",
+                    summary.oversized_capped
                 ),
             );
         }
@@ -1558,7 +1558,7 @@ struct ExportSummary {
     avg_savings_pct: f64,
     total_time_ms: u64,
     avg_time_ms: u64,
-    oversized_excluded: usize,
+    oversized_capped: usize,
 }
 
 fn export_json(
@@ -1582,7 +1582,7 @@ fn export_json(
             avg_savings_pct: summary.avg_savings_pct,
             total_time_ms: summary.total_time_ms,
             avg_time_ms: summary.avg_time_ms,
-            oversized_excluded: summary.oversized_excluded,
+            oversized_capped: summary.oversized_capped,
         },
         daily: if all || daily {
             Some(tracker.get_all_days_filtered(project_scope)?) // changed: use filtered
