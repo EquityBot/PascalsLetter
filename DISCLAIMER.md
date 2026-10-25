@@ -1,6 +1,8 @@
-# Disclaimer
+# Use and licence
 
-## No Warranty
+The [Apache License 2.0](LICENSE) sets the warranty and liability terms for the
+source code and precompiled binaries. Third-party components retain their own
+licences. Verify binary checksums when available.
 
 This software is provided "AS IS", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement. The entire risk as to the quality and performance of the software is with you.
 

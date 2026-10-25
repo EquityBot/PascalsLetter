@@ -2,6 +2,14 @@
   <img src="https://avatars.githubusercontent.com/u/258253854?v=4" alt="RTK - Rust Token Killer" width="500">
 </p>
 
+<div align="center">
+
+**Fork status**
+
+[![Fork code quality](https://img.shields.io/codacy/grade/68c5d91770634f3b86493583fd8eada6/develop?style=flat&labelColor=000000)](https://app.codacy.com/gh/ryanduguid/rtk/dashboard)
+
+</div>
+
 <p align="center">
   <strong>Agent-agnostic token optimization: compress, route, filter, and more.</strong>
   <br><br>
@@ -9,11 +17,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
-  <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk" alt="Release"></a>
-  <a href="#license"><img src="https://img.shields.io/badge/license-Apache--2.0%20%2B%20BUSL--1.1-blue.svg" alt="License: Apache-2.0 and BUSL-1.1"></a>
-  <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord" alt="Discord"></a>
-  <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk" alt="Homebrew"></a>
+  <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://img.shields.io/github/actions/workflow/status/rtk-ai/rtk/ci.yml?branch=develop&label=CI&style=flat&labelColor=000000" alt="CI"></a>
+  <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk?style=flat&labelColor=000000&color=66023C" alt="Release"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/License-Apache--2.0%20%2B%20BUSL--1.1-66023C?style=flat&labelColor=000000&color=66023C" alt="License: Apache-2.0 and BUSL-1.1"></a>
+  <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord&style=flat&labelColor=000000&logoColor=E5E4E2&color=66023C" alt="Discord"></a>
+  <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk?style=flat&labelColor=000000&color=66023C" alt="Homebrew"></a>
 </p>
 
 <p align="center">
