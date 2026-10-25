@@ -213,6 +213,12 @@ enum Commands {
         /// Keep only last N lines
         #[arg(long, conflicts_with_all = ["max_lines", "head_lines"])]
         tail_lines: Option<usize>,
+        /// Start an exact range at this one-based line (requires --lines)
+        #[arg(long = "from", requires = "lines")]
+        from_line: Option<std::num::NonZeroUsize>,
+        /// Read at most N exact lines (0 reads none); defaults to starting at line 1
+        #[arg(long, conflicts_with_all = ["max_lines", "head_lines", "tail_lines", "level"])]
+        lines: Option<usize>,
         /// Show line numbers
         #[arg(short = 'n', long)]
         line_numbers: bool,
@@ -1922,7 +1928,17 @@ fn run_fallback(parse_error: clap::Error) -> Result<i32> {
 
     // RTK meta-commands should never fall back to raw execution.
     // e.g. `rtk gain --badtypo` should show Clap's error, not try to run `gain` from $PATH.
-    if core::constants::RTK_META_COMMANDS.contains(&args[0].as_str()) {
+    // Recover the selected subcommand even when a root option precedes it or a
+    // subcommand argument failed validation. Let clap classify its own syntax.
+    let meta_command = rtk_command()
+        .ignore_errors(true)
+        .try_get_matches_from(std::env::args_os())
+        .ok()
+        .and_then(|matches| matches.subcommand_name().map(str::to_owned));
+    if meta_command
+        .as_deref()
+        .is_some_and(|name| core::constants::RTK_META_COMMANDS.contains(&name))
+    {
         parse_error.exit();
     }
 
@@ -2565,17 +2581,30 @@ fn run_cli() -> Result<i32> {
             max_lines,
             head_lines,
             tail_lines,
+            from_line,
+            lines,
             line_numbers,
         } => {
             let mut had_error = false;
             let mut stdin_seen = false;
             for file in &files {
-                let result = if file == Path::new("-") {
+                let is_stdin = file == Path::new("-");
+                if is_stdin {
                     if stdin_seen {
                         eprintln!("rtk: warning: stdin specified more than once");
                         continue;
                     }
                     stdin_seen = true;
+                }
+                let result = if let Some(count) = lines {
+                    read::run_range(
+                        file,
+                        from_line.map_or(1, |line| line.get()),
+                        count,
+                        line_numbers,
+                        cli.verbose,
+                    )
+                } else if is_stdin {
                     read::run_stdin(
                         level,
                         max_lines,
@@ -4667,7 +4696,6 @@ mod tests {
         const PASSTHROUGH: &[&str] = &[
             "ls",
             "tree",
-            "read",
             "rg",
             "ast-grep",
             "git",

@@ -2196,9 +2196,20 @@ impl TimedExecution {
     /// transcoded (inflated) length rather than what the wrapped command emitted,
     /// overstating the reduction.
     pub fn track_bytes(&self, original_cmd: &str, rtk_cmd: &str, input_len: usize, output: &str) {
+        self.track_byte_counts(original_cmd, rtk_cmd, input_len, output.len());
+    }
+
+    /// Record streamed or binary output without retaining or decoding it for accounting.
+    pub fn track_byte_counts(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input_len: usize,
+        output_len: usize,
+    ) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         let input_tokens = estimate_tokens_from_len(input_len);
-        let output_tokens = estimate_tokens(output);
+        let output_tokens = estimate_tokens_from_len(output_len);
 
         if let Ok(tracker) = Tracker::new() {
             let _ = tracker.record(

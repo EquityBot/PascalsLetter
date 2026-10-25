@@ -18,6 +18,7 @@ pub const RTK_META_COMMANDS: &[&str] = &[
     "bypass",
     "proxy",
     "recall",
+    "read",
     "run",
     "hook",
     "hook-audit",

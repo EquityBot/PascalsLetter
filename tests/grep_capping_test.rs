@@ -132,6 +132,25 @@ fn assert_every_clip_keeps(args: &[&str], line: impl Fn(usize) -> String, wanted
     assert_every_clip_keeps_in(&[], args, line, wanted);
 }
 
+#[test]
+fn an_rg_config_cannot_make_the_locator_choose_a_unicode_decoy() {
+    let dir = tempfile::tempdir().expect("test setup");
+    let config = dir.path().join("rg.conf");
+    std::fs::write(&config, "--no-unicode\n").expect("write rg config");
+    assert_every_clip_keeps_in(
+        &[("RIPGREP_CONFIG_PATH", config.to_str().expect("config path"))],
+        &["rg", r"\wneedle"],
+        |i| {
+            format!(
+                "éneedle {} 7needle {} {i}",
+                "f".repeat(240),
+                "g".repeat(240)
+            )
+        },
+        "7needle",
+    );
+}
+
 /// [`assert_every_clip_keeps`] with extra environment, such as a locale.
 fn assert_every_clip_keeps_in(
     env: &[(&str, &str)],
@@ -139,12 +158,17 @@ fn assert_every_clip_keeps_in(
     line: impl Fn(usize) -> String,
     wanted: &str,
 ) {
-    // CI runners have grep but not always rg; a case for a missing engine has nothing to test.
+    // Local contributors may omit an engine; CI must exercise every search case.
     let probe = std::process::Command::new(args[0])
         .arg("--version")
         .output();
     if let Err(error) = probe {
         if error.kind() == std::io::ErrorKind::NotFound {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI requires {} on PATH; search coverage must not be skipped",
+                args[0]
+            );
             eprintln!("skipped: {} is not installed", args[0]);
             return;
         }
@@ -193,6 +217,10 @@ fn a_pcre_lookbehind_keeps_its_match() {
         .output()
         .is_ok_and(|o| o.status.success());
     if !pcre {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "CI requires ripgrep with PCRE2 support"
+        );
         return;
     }
     let line = |i| format!("{} foobar {} {i}", "f".repeat(240), "g".repeat(240));

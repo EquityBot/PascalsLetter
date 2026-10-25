@@ -1461,8 +1461,15 @@ fn match_locator(
 
 /// The locator for this search, or none where its matches could differ from the engine's:
 /// PCRE; `-w` and `-x`, whose word and line boundaries the locator does not model; rg's
-/// `--no-unicode`; and grep outside the C locale.
+/// `--no-unicode` or an unexamined config file; and grep outside the C locale.
 fn locator_for<T: AsRef<str>>(engine: Engine, args: &[T], patterns: &[String]) -> Option<Locator> {
+    // rg loads flags from this file before its CLI arguments. Its effective
+    // dialect, case rules and Unicode mode may therefore differ from ours.
+    if engine == Engine::Rg
+        && crate::core::user_env::var_os("RIPGREP_CONFIG_PATH").is_some_and(|path| !path.is_empty())
+    {
+        return None;
+    }
     let tokens = tokenize_search_args(args, engine);
     let unmodelled = arg_tokenizer::before_dashdash(&tokens).iter().any(|t| {
         (t.kind == TokenKind::Short && matches!(t.text, "w" | "x"))
@@ -1671,6 +1678,17 @@ mod tests {
     fn test_locator_for_skips_rg_without_unicode() {
         let patterns = ["needle".to_string()];
         assert!(locator_for(Engine::Rg, &["--no-unicode", "needle"], &patterns).is_none());
+    }
+
+    #[test]
+    fn test_locator_for_refuses_unexamined_rg_configuration() {
+        let patterns = ["needle".to_string()];
+        for config in [None, Some(""), Some("rg.conf")] {
+            let located = user_env::with_vars(&[("RIPGREP_CONFIG_PATH", config)], || {
+                locator_for(Engine::Rg, &["needle"], &patterns).is_some()
+            });
+            assert_eq!(located, config.is_none_or(str::is_empty));
+        }
     }
 
     #[test]

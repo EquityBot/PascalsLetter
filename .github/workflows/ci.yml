@@ -92,6 +92,8 @@ jobs:
     needs: clippy
     steps:
       - uses: actions/checkout@v7
+      - name: Install required search tools
+        run: sudo apt-get update && sudo apt-get install -y ripgrep grep
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -134,6 +136,26 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - name: Install required search tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ripgrep grep
+      - name: Install required search tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ripgrep grep
+          echo "$(brew --prefix grep)/libexec/gnubin" >> "$GITHUB_PATH"
+      - name: Install required search tools (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install ripgrep --yes --no-progress
+          "C:\Program Files\Git\usr\bin" >> $env:GITHUB_PATH
+      - name: Verify required search capabilities
+        shell: bash
+        run: |
+          set -e
+          grep --version
+          rg --version
+          rg --pcre2-version
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}

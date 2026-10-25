@@ -127,11 +127,26 @@ rtk read - [options]          # Read from stdin
 
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
-| `--level` | `-l` | `minimal` | Filtering level: `none`, `minimal`, `aggressive` |
+| `--level` | `-l` | `none` | Filtering level: `none`, `minimal`, `aggressive` |
 | `--max-lines` | `-m` | unlimited | Structural preview capped at N lines (signatures and imports, not the first N) |
 | `--head-lines` | | unlimited | Keep only the first N lines, byte-exact |
 | `--tail-lines` | | unlimited | Keep only the last N lines, byte-exact |
+| `--from` | | 1 | First source line of an exact range, one-based; requires `--lines` |
+| `--lines` | | unset | Exact range length; 0 emits no lines |
 | `--line-numbers` | `-n` | no | Show line numbers |
+
+Retrieve an exact source range with `rtk read main.rs --from 301 --lines 80`.
+The range applies independently to each input file or `-` for stdin. It preserves
+all selected bytes, including CRLF, invalid UTF-8 and an unterminated final line.
+A start beyond EOF returns empty output; a count past EOF returns the available lines.
+Read-policy denials still print their message and exit unsuccessfully.
+
+Ranges conflict with `--head-lines`, `--tail-lines`, `--max-lines` and an explicit
+`--level`, including `--level none`. With `-n`, selected text must be valid UTF-8;
+numbers refer to original source lines and line endings are normalised to LF.
+Unnumbered ranges stream with an 8 KiB buffer and stop after the requested lines.
+Finding the start still scans preceding bytes, and a line has no fixed byte limit.
+This opt-in pilot adds no automatic command rewrites or agent configuration changes.
 
 **Filtering levels:**
 

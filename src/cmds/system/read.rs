@@ -25,12 +25,7 @@ pub fn run(
     // its message instead of the file — covering `cat big.java` too, since
     // the rewrite turns it into `rtk read big.java`.
     let whole_file = max_lines.is_none() && head_lines.is_none() && tail_lines.is_none();
-    if let Some(decision) = crate::core::pipeline_config::before_read_decision(file, whole_file) {
-        println!("{}", decision.message);
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-        std::process::exit(1);
-    }
+    check_read_policy(file, whole_file);
 
     if verbose > 0 {
         eprintln!("Reading: {} (filter: {})", file.display(), level);
@@ -218,17 +213,88 @@ pub fn run_stdin(
     Ok(())
 }
 
+fn check_read_policy(file: &Path, whole_file: bool) {
+    if let Some(decision) = crate::core::pipeline_config::before_read_decision(file, whole_file) {
+        println!("{}", decision.message);
+        let _ = io::stdout().flush();
+        std::process::exit(1);
+    }
+}
+
+/// Exact, opt-in range retrieval. No filtering or whole-file baseline is involved.
+pub fn run_range(
+    file: &Path,
+    first: usize,
+    count: usize,
+    line_numbers: bool,
+    verbose: u8,
+) -> Result<()> {
+    let timer = tracking::TimedExecution::start();
+    let is_stdin = file == Path::new("-");
+    if !is_stdin {
+        check_read_policy(file, false);
+    }
+    if verbose > 0 {
+        eprintln!("Reading: {} (from {first}, lines {count})", file.display());
+    }
+    let mut input: Box<dyn IoRead> = if is_stdin {
+        Box::new(io::stdin().lock())
+    } else {
+        Box::new(
+            fs::File::open(file)
+                .with_context(|| format!("Failed to read file: {}", file.display()))?,
+        )
+    };
+    let mut output = io::stdout().lock();
+    let (selected, emitted) = if line_numbers {
+        let mut bytes = Vec::new();
+        let selected = copy_line_range(&mut input, &mut bytes, first - 1, count)
+            .context("Failed to read line range")?;
+        let content =
+            std::str::from_utf8(&bytes).context("Failed to decode selected line range")?;
+        let numbered = format_with_line_numbers_from(content, first);
+        output
+            .write_all(numbered.as_bytes())
+            .context("Failed to write line range")?;
+        (selected, numbered.len())
+    } else {
+        let selected = copy_line_range(&mut input, &mut output, first - 1, count)
+            .context("Failed to copy line range")?;
+        (selected, selected)
+    };
+    output.flush().context("Failed to flush line range")?;
+    let label = format!(
+        "rtk read {} --from {first} --lines {count}{}",
+        quote_word(&file.to_string_lossy()),
+        if line_numbers { " -n" } else { "" }
+    );
+    timer.track_byte_counts(&label, "rtk read --lines", selected, emitted);
+    Ok(())
+}
+
 /// The tracked command for reading `file`, with the path quoted as one word.
 pub(crate) fn cat_label(file: &Path) -> String {
     format!("cat {}", quote_word(&file.to_string_lossy()))
 }
 
 fn format_with_line_numbers(content: &str) -> String {
+    format_with_line_numbers_from(content, 1)
+}
+
+fn format_with_line_numbers_from(content: &str, first: usize) -> String {
     let lines: Vec<&str> = content.lines().collect();
-    let width = lines.len().to_string().len();
+    let width = first
+        .saturating_add(lines.len().saturating_sub(1))
+        .to_string()
+        .len();
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
-        out.push_str(&format!("{:>width$} │ {}\n", i + 1, line, width = width));
+        out.push_str(&format!(
+            "{:>width$} │ {}\n",
+            first.saturating_add(i),
+            line,
+            width = width
+        ));
     }
     out
 }
@@ -262,36 +328,60 @@ const READ_CHUNK: usize = 8192;
 /// still needs the file whole -- `--tail-lines` inherently so -- and none of those is reachable
 /// from a `head` rewrite, which is what made this path the one that had to stop early.
 fn read_head_lines(file: &Path, n: usize) -> Result<Vec<u8>> {
-    let mut handle =
+    let handle =
         fs::File::open(file).with_context(|| format!("Failed to read file: {}", file.display()))?;
     let mut window = Vec::new();
+    copy_line_range(handle, &mut window, 0, n)
+        .with_context(|| format!("Failed to read file: {}", file.display()))?;
+    Ok(window)
+}
+
+/// Skip without retaining bytes, then copy complete LF-delimited lines. The final read
+/// can reach at most one chunk past the requested newline; it never waits for EOF after it.
+fn copy_line_range(
+    mut input: impl IoRead,
+    mut output: impl Write,
+    mut skip: usize,
+    mut count: usize,
+) -> io::Result<usize> {
     let mut chunk = [0u8; READ_CHUNK];
-    let mut seen = 0;
-    while seen < n {
-        let read = match handle.read(&mut chunk) {
+    let mut written = 0;
+    while count > 0 {
+        let read = match input.read(&mut chunk) {
             Ok(read) => read,
             // `fs::read`, which this replaces, retries this itself; a bare `read` does not,
             // and turning a signal into a failed read would lose the window entirely.
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("Failed to read file: {}", file.display()));
-            }
+            Err(error) => return Err(error),
         };
         if read == 0 {
             break;
         }
-        for &byte in &chunk[..read] {
-            window.push(byte);
+        let mut start = 0;
+        while skip > 0 && start < read {
+            if chunk[start] == b'\n' {
+                skip -= 1;
+            }
+            start += 1;
+        }
+        if skip > 0 {
+            continue;
+        }
+        let mut end = start;
+        while end < read {
+            let byte = chunk[end];
+            end += 1;
             if byte == b'\n' {
-                seen += 1;
-                if seen == n {
+                count -= 1;
+                if count == 0 {
                     break;
                 }
             }
         }
+        output.write_all(&chunk[start..end])?;
+        written += end - start;
     }
-    Ok(window)
+    Ok(written)
 }
 
 /// `file`'s size on disk, and `None` for anything whose size says nothing about how much it
@@ -367,6 +457,71 @@ mod tests {
     fn cat_label_quotes_a_path_as_one_word() {
         assert_eq!(cat_label(Path::new("src/main.rs")), "cat src/main.rs");
         assert_eq!(cat_label(Path::new("my notes.txt")), "cat 'my notes.txt'");
+    }
+
+    #[test]
+    fn ranges_match_an_independent_byte_oracle_across_chunks() -> Result<()> {
+        let inputs = [
+            format!(
+                "{}\r\n{}\nlast",
+                "x".repeat(READ_CHUNK - 1),
+                "y".repeat(READ_CHUNK * 2)
+            ),
+            format!("{}\nsecond\n", "x".repeat(READ_CHUNK)),
+            format!("{}\nsecond\n", "x".repeat(READ_CHUNK - 2)),
+        ];
+        for input in inputs {
+            let lines: Vec<_> = input.as_bytes().split_inclusive(|&b| b == b'\n').collect();
+            for skip in [0, 1, 2, usize::MAX] {
+                for count in [0, 1, 2, usize::MAX] {
+                    let expected: Vec<_> = lines
+                        .iter()
+                        .skip(skip)
+                        .take(count)
+                        .flat_map(|line| line.iter().copied())
+                        .collect();
+                    let mut output = Vec::new();
+                    assert_eq!(
+                        copy_line_range(input.as_bytes(), &mut output, skip, count)?,
+                        expected.len()
+                    );
+                    assert_eq!(output, expected);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ranges_retry_interruptions_and_stop_without_another_read() -> Result<()> {
+        struct Source {
+            interrupted: bool,
+            sent: bool,
+        }
+        impl IoRead for Source {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if !self.interrupted {
+                    self.interrupted = true;
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                assert!(!self.sent, "range read past its last requested newline");
+                self.sent = true;
+                let bytes = b"skip\r\nselected\r\nunrequested";
+                buf[..bytes.len()].copy_from_slice(bytes);
+                Ok(bytes.len())
+            }
+        }
+        let mut source = Source {
+            interrupted: false,
+            sent: false,
+        };
+        assert_eq!(copy_line_range(&mut source, io::sink(), usize::MAX, 0)?, 0);
+        assert!(!source.interrupted, "zero count consumed input");
+        let mut output = Vec::new();
+        assert_eq!(copy_line_range(&mut source, &mut output, 1, 1)?, 10);
+        assert_eq!(output, b"selected\r\n");
+        assert!(copy_line_range(io::empty(), io::sink(), 0, 1).is_ok());
+        Ok(())
     }
 
     /// `read_head_lines` must agree with `head_window` byte-for-byte on every shape, since it
