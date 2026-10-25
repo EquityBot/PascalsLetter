@@ -2146,6 +2146,22 @@ enum GtCommands {
     Other(Vec<OsString>),
 }
 
+/// The reason `cat` itself would print. An `io::Error` displays as the OS message plus
+/// `(os error N)`, which on Windows reads "The system cannot find the file specified.
+/// (os error 2)" -- longer than what the agent would have seen from `cat`, for no more meaning.
+fn cat_error_text(e: &anyhow::Error) -> String {
+    match e
+        .root_cause()
+        .downcast_ref::<std::io::Error>()
+        .map(|io| io.kind())
+    {
+        Some(std::io::ErrorKind::NotFound) => "No such file or directory".to_string(),
+        Some(std::io::ErrorKind::PermissionDenied) => "Permission denied".to_string(),
+        Some(std::io::ErrorKind::IsADirectory) => "Is a directory".to_string(),
+        _ => e.root_cause().to_string(),
+    }
+}
+
 /// Split a string into shell-like tokens, respecting single and double quotes.
 /// e.g. `git log --format="%H %s"` → ["git", "log", "--format=%H %s"]
 fn shell_split(input: &str) -> Vec<String> {
@@ -2580,7 +2596,7 @@ fn run_cli() -> Result<i32> {
                     )
                 };
                 if let Err(e) = result {
-                    eprintln!("cat: {}: {}", file.display(), e.root_cause());
+                    eprintln!("cat: {}: {}", file.display(), cat_error_text(&e));
                     had_error = true;
                 }
             }
@@ -5878,6 +5894,16 @@ mod tests {
             grep_extra_args(&["rtk", "grep", "--file-type", "rust", "FOO", "src/"]).unwrap(),
             vec!["--file-type", "rust", "FOO", "src/"]
         );
+    }
+
+    #[test]
+    fn test_cat_error_text_matches_cat_for_a_missing_file() {
+        let io = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let e = anyhow::Error::new(io).context("Failed to read file: x.py");
+        assert_eq!(cat_error_text(&e), "No such file or directory");
+
+        let other = anyhow::anyhow!("binary file");
+        assert_eq!(cat_error_text(&other), "binary file");
     }
 
     /// Parse `rtk grep …` into the full `Grep` field set for inspection.
