@@ -805,7 +805,11 @@ pub fn run(
         None
     };
 
-    let locate = match_locator(&patterns, pattern_dialect(engine, args));
+    let locate = match_locator(
+        &patterns,
+        pattern_dialect(engine, args),
+        ignores_case(engine, args, &patterns),
+    );
     let mut by_file: HashMap<String, Vec<(usize, bool, String)>> = HashMap::new();
     for line in raw_output.lines() {
         let Some((file, line_num, is_match, content)) = parse_match_line(line) else {
@@ -939,9 +943,10 @@ pub fn run(
     // only the grouped form fits what the agent sees: the faithful one would lose its tail,
     // and with it the files and overflow hints the grouped form keeps.
     let budget = crate::core::config::limits().agent_output_max_chars;
-    let fits = |s: &str| s.chars().count() <= budget;
+    let (grouped_chars, plain_chars) = (rtk_output.chars().count(), plain.chars().count());
     let output = if capped
-        && (rtk_output.len() * 3 <= plain.len() * 2 || (fits(&rtk_output) && !fits(&plain)))
+        && (grouped_chars * 3 <= plain_chars * 2
+            || (grouped_chars <= budget && plain_chars > budget))
     {
         rtk_output
     } else {
@@ -1177,8 +1182,9 @@ fn clean_line(
         .and_then(|re| re.find(trimmed))
         .map(|m| trimmed[..m.start()].chars().count())
     else {
-        let t: String = trimmed.chars().take(max_len.saturating_sub(3)).collect();
-        return format!("{}...", t);
+        // No trustworthy position (a PCRE-only construct, a mid-pattern BRE `^`): a clip
+        // could cut away the match, so the line stays whole.
+        return trimmed.to_string();
     };
 
     let start = char_pos.saturating_sub(max_len / 3).min(char_len - max_len);
@@ -1225,6 +1231,30 @@ fn pattern_dialect<T: AsRef<str>>(engine: Engine, args: &[T]) -> PatternDialect 
     dialect
 }
 
+/// Whether the engine ignores case, by the user's own flags (the last one wins). Unknown
+/// settings, such as an rg config file's `--smart-case`, count as case-sensitive: a locator
+/// stricter than the engine finds a real match or none, never a lookalike.
+fn ignores_case<T: AsRef<str>>(engine: Engine, args: &[T], patterns: &[String]) -> bool {
+    let tokens = tokenize_search_args(args, engine);
+    let (mut ignore, mut smart) = (false, false);
+    for t in arg_tokenizer::before_dashdash(&tokens) {
+        match (engine, t.kind, t.text) {
+            (_, TokenKind::Short, "i") | (_, TokenKind::Long, "ignore-case") => {
+                (ignore, smart) = (true, false)
+            }
+            (Engine::Grep, TokenKind::Short, "y") => (ignore, smart) = (true, false),
+            (Engine::Grep, TokenKind::Long, "no-ignore-case")
+            | (Engine::Rg, TokenKind::Short, "s")
+            | (Engine::Rg, TokenKind::Long, "case-sensitive") => (ignore, smart) = (false, false),
+            (Engine::Rg, TokenKind::Short, "S") | (Engine::Rg, TokenKind::Long, "smart-case") => {
+                (ignore, smart) = (false, true)
+            }
+            _ => {}
+        }
+    }
+    ignore || smart && !patterns.iter().any(|p| p.chars().any(char::is_uppercase))
+}
+
 /// A BRE as the equivalent Rust regex: the escaped and bare forms of `+ ? | ( ) { }` swap.
 fn bre_to_regex(pattern: &str) -> String {
     const SWAPPED: &str = "+?|(){}";
@@ -1254,7 +1284,7 @@ fn bre_to_regex(pattern: &str) -> String {
 /// multi-line one, which both engines take as separate patterns) in the engine's dialect. A
 /// pattern Rust's regex does not accept (PCRE lookaround) is located as a literal; case is
 /// ignored either way, since this only places the window.
-fn match_locator(patterns: &[String], dialect: PatternDialect) -> Option<Regex> {
+fn match_locator(patterns: &[String], dialect: PatternDialect, ignore_case: bool) -> Option<Regex> {
     let pieces: Vec<&str> = patterns
         .iter()
         .flat_map(|p| p.split('\n'))
@@ -1263,7 +1293,7 @@ fn match_locator(patterns: &[String], dialect: PatternDialect) -> Option<Regex> 
     let build = |each: &dyn Fn(&str) -> String| {
         let alternation: Vec<String> = pieces.iter().map(|p| format!("(?:{})", each(p))).collect();
         regex::RegexBuilder::new(&alternation.join("|"))
-            .case_insensitive(true)
+            .case_insensitive(ignore_case)
             .build()
             .ok()
     };
@@ -1301,7 +1331,7 @@ mod tests {
     use super::*;
 
     fn locator(pattern: &str) -> Option<Regex> {
-        match_locator(&[pattern.to_string()], PatternDialect::Regex)
+        match_locator(&[pattern.to_string()], PatternDialect::Regex, true)
     }
 
     #[test]
@@ -1409,11 +1439,35 @@ mod tests {
         assert_eq!(grep(&["-F", "-E", "x"]), Regex);
         assert_eq!(grep(&["-P", "-G", "x"]), Basic);
         assert_eq!(grep(&["--", "-F"]), Basic);
+        assert_eq!(grep(&["-e", "-F", "f"]), Basic);
+        assert_eq!(rg(&["-e", "-F", "f"]), Regex);
         assert_eq!(rg(&["x"]), Regex);
         assert_eq!(rg(&["-F", "x"]), Fixed);
         assert_eq!(rg(&["-F", "--no-fixed-strings", "x"]), Regex);
         // rg's -E is --encoding, not a pattern mode.
         assert_eq!(rg(&["-F", "-E", "utf8", "x"]), Fixed);
+    }
+
+    #[test]
+    fn test_ignores_case_only_when_the_flags_say_so() {
+        let grep = |args: &[&str], p: &str| ignores_case(Engine::Grep, args, &[p.to_string()]);
+        let rg = |args: &[&str], p: &str| ignores_case(Engine::Rg, args, &[p.to_string()]);
+        assert!(!grep(&["x"], "x"));
+        assert!(grep(&["-ri", "x"], "x"));
+        assert!(grep(&["-y", "x"], "x"));
+        assert!(!grep(&["-i", "--no-ignore-case", "x"], "x"));
+        assert!(!grep(&["--", "-i"], "x"));
+        assert!(!rg(&["x"], "x"));
+        assert!(rg(&["-S", "x"], "x"));
+        assert!(!rg(&["-S", "X"], "X"));
+        assert!(!rg(&["-i", "-s", "x"], "x"));
+    }
+
+    #[test]
+    fn test_clean_line_keeps_a_line_whole_without_a_located_match() {
+        let line = format!("{} a^b {}", "f".repeat(100), "g".repeat(100));
+        let re = match_locator(&["a^b".to_string()], PatternDialect::Basic, false);
+        assert_eq!(clean_line(&line, 40, None, re.as_ref()), line);
     }
 
     #[test]
@@ -1428,7 +1482,7 @@ mod tests {
         let line = format!("aXb {} a.b aab {}", "f".repeat(60), "g".repeat(60));
         let at = |patterns: &[&str], d| {
             let patterns: Vec<String> = patterns.iter().map(|p| p.to_string()).collect();
-            match_locator(&patterns, d)
+            match_locator(&patterns, d, false)
                 .and_then(|re| re.find(&line))
                 .map(|m| m.as_str().to_string())
         };

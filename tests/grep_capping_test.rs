@@ -126,3 +126,53 @@ fn grouped_output_is_kept_when_only_it_fits_the_agent_cap() {
         native.stdout.len()
     );
 }
+
+/// 400 long lines force the grouped form; every shown line must still hold `wanted`.
+fn assert_every_clip_keeps(args: &[&str], line: impl Fn(usize) -> String, wanted: &str) {
+    let dir = tempfile::tempdir().expect("test setup");
+    let body: String = (0..400).map(|i| line(i) + "\n").collect();
+    std::fs::write(dir.path().join("long.txt"), body).expect("test setup");
+
+    let out = common::rtk_command()
+        .args(args)
+        .arg("long.txt")
+        .current_dir(dir.path())
+        .output()
+        .expect("rtk");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.starts_with("400 matches in 1 files:"),
+        "{stdout:.300}"
+    );
+    let shown: Vec<&str> = stdout.lines().filter(|l| l.contains("fff")).collect();
+    assert!(!shown.is_empty(), "{stdout:.300}");
+    for l in shown {
+        assert!(l.contains(wanted), "clip lost {wanted:?}: {l}");
+    }
+}
+
+#[test]
+fn a_case_sensitive_clip_skips_a_differently_cased_lookalike() {
+    let line = |i| format!("A.B {} a.b {} {i}", "f".repeat(240), "g".repeat(240));
+    assert_every_clip_keeps(&["grep", "-F", "a.b"], line, "a.b");
+}
+
+#[test]
+fn a_bre_literal_caret_keeps_its_match() {
+    let line = |i| format!("{} a^b {} {i}", "f".repeat(240), "g".repeat(240));
+    assert_every_clip_keeps(&["grep", "a^b"], line, "a^b");
+}
+
+#[test]
+fn a_pcre_lookbehind_keeps_its_match() {
+    let pcre = std::process::Command::new("rg")
+        .arg("--pcre2-version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !pcre {
+        return;
+    }
+    let line = |i| format!("{} foobar {} {i}", "f".repeat(240), "g".repeat(240));
+    assert_every_clip_keeps(&["rg", "--pcre2", "(?<=foo)bar"], line, "foobar");
+}
