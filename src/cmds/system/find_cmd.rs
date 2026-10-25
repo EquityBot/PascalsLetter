@@ -1525,8 +1525,10 @@ mod tests {
     #[test]
     fn run_from_args_propagates_find_exit_status() {
         let argv = ["/definitely/missing/xyz", "-mtime", "+0"];
-        let expected = std::process::Command::new("find")
-            .args(argv)
+        // Match production's PATH resolution: bare Command::new("find") can
+        // select Windows' unrelated System32 FIND.EXE ahead of GNU find.
+        let expected = crate::core::utils::resolved_command("find")
+            .child_args(argv)
             .output()
             .map(|o| o.status.code().unwrap_or(1))
             .unwrap_or(127);
