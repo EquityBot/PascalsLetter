@@ -310,6 +310,16 @@ fn git_diff_over_the_full_diff_budget_is_still_compacted() {
         "not compacted: {} bytes",
         stdout.len()
     );
+
+    // The truncation hint names a stored copy of the whole diff, not a rerun.
+    let hash = stdout
+        .split("[full output: rtk recall ")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .unwrap_or_else(|| panic!("no recall hint: {stdout}"));
+    let (full, stderr, code) = rtk_output_in_dir(dir.path(), &["recall", hash, "--full"]);
+    assert_eq!(code, Some(0), "rtk recall stderr: {stderr}");
+    assert!(full.contains("+line 2999 "), "recall lost the tail");
 }
 
 #[test]

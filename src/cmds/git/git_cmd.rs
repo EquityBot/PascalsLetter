@@ -447,7 +447,12 @@ fn run_diff(
     }
 
     let printed = if !diff_result.stdout.is_empty() {
-        let compacted = compact_diff(&strip_ansi(&diff_result.stdout), max_lines.unwrap_or(500));
+        let plain = strip_ansi(&diff_result.stdout);
+        let compacted = with_full_diff_hint(
+            compact_diff(&plain, max_lines.unwrap_or(500)),
+            &plain,
+            "git-diff",
+        );
         format!("{}\n\nChanges:\n{}", result.stdout.trim(), compacted)
     } else {
         result.stdout.trim().to_string()
@@ -783,7 +788,12 @@ fn run_show(
         if verbose > 0 {
             printed.push_str("\n\nChanges:");
         }
-        let compacted = compact_diff(&strip_ansi(diff_text), max_lines.unwrap_or(500));
+        let plain = strip_ansi(diff_text);
+        let compacted = with_full_diff_hint(
+            compact_diff(&plain, max_lines.unwrap_or(500)),
+            &plain,
+            "git-show",
+        );
         printed.push('\n');
         printed.push_str(&compacted);
     }
@@ -1524,10 +1534,24 @@ pub(crate) fn compact_diff(diff: &str, max_lines: usize) -> String {
     }
 
     if was_truncated {
-        result.push("[full diff: rtk git diff --no-compact]".to_string());
+        result.push(NO_COMPACT_HINT.to_string());
     }
 
     result.join("\n")
+}
+
+const NO_COMPACT_HINT: &str = "[full diff: rtk git diff --no-compact]";
+
+/// Points a truncated diff at a stored copy of the full one, so the agent can read exactly what
+/// was elided without rerunning git. Keeps the `--no-compact` hint when recovery is off.
+fn with_full_diff_hint(compacted: String, full: &str, slug: &str) -> String {
+    match compacted.strip_suffix(NO_COMPACT_HINT) {
+        Some(head) => match crate::core::tee::force_tee_hint(full, slug) {
+            Some(hint) => format!("{head}{hint}"),
+            None => compacted,
+        },
+        None => compacted,
+    }
 }
 
 /// RTK's default `git log` limit, applied whenever the user names none.
