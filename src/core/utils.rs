@@ -1394,11 +1394,28 @@ mod tests {
             "~",
             "@resp",
             "",
+            // Left unquoted by `msys_would_rewrite`: these must reach the child as typed too.
+            "%PATH%",
+            "^&|<>",
+            "$HOME",
+            "`x`",
+            "a;b",
+            "(x)",
+            "-",
+            "ü🎉",
+            // Quoted for their whitespace or backslashes.
+            "a b",
+            "tab\there",
+            "line\nbreak",
+            r"\",
+            r"\\server\share",
+            r"C:\Program Files\x",
         ];
-        cmd.child_arg("%s\\n").child_args(args);
+        cmd.child_arg("%s\\0").child_args(args);
         let out = cmd.output().expect("printf runs");
         let got = String::from_utf8(out.stdout).unwrap();
-        assert_eq!(got.lines().collect::<Vec<_>>(), args);
+        let got: Vec<&str> = got.split('\0').collect();
+        assert_eq!(got[..got.len() - 1], args);
     }
 
     // ===== Windows-specific PATHEXT resolution tests (issue #212) =====
