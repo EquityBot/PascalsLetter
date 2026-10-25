@@ -440,22 +440,22 @@ enum Commands {
         // grep/rg flag of the same letter and captures it before it can reach
         // src/cmds/system/search.rs, the shared filter behind `rtk grep` and
         // `rtk rg`.
-        /// Max line length
+        /// Max line length once output is capped [default: `[limits] grep_max_line_len`]
         // No short: `-l` is grep's --files-with-matches. Bound to a `usize` it
         // accepted numeric patterns -- `rtk grep -l 8080 a.txt b.txt` set
         // max_len=8080, took a.txt as the pattern, and returned empty output
         // with no error.
-        #[arg(long, default_value = "80")]
-        max_len: usize,
-        /// Max results to show
+        #[arg(long)]
+        max_len: Option<usize>,
+        /// Max results to show [default: `[limits] grep_max_results`]
         // No short: `-m` is GNU grep's --max-count (stop after N matches per
         // file). Deriving it to RTK's --max (a display cap) silently swallowed
         // `-m N` so grep never saw the real --max-count. Without the short, `-m`
         // flows to extra_args and is forwarded verbatim to grep/rg, which applies
         // genuine --max-count while RTK still compacts (matches how `rtk rg -m`
         // already behaves). --max keeps its long form.
-        #[arg(long, default_value = "200")]
-        max: usize,
+        #[arg(long)]
+        max: Option<usize>,
         /// Show only match context (not full line)
         #[arg(long)]
         context_only: bool,
@@ -2978,17 +2978,28 @@ fn run_cli() -> Result<i32> {
             max,
             context_only,
             extra_args,
-        } => search::run(
-            search::Engine::Grep,
-            max_len,
-            max,
-            context_only,
-            &extra_args,
-            cli.verbose,
-        )?,
+        } => {
+            let limits = core::config::limits();
+            search::run(
+                search::Engine::Grep,
+                max_len.unwrap_or(limits.grep_max_line_len),
+                max.unwrap_or(limits.grep_max_results),
+                context_only,
+                &extra_args,
+                cli.verbose,
+            )?
+        }
         Commands::AstGrep { extra_args } => ast_grep_cmd::run(&extra_args)?,
         Commands::Rg { extra_args } => {
-            search::run(search::Engine::Rg, 80, 200, false, &extra_args, cli.verbose)?
+            let limits = core::config::limits();
+            search::run(
+                search::Engine::Rg,
+                limits.grep_max_line_len,
+                limits.grep_max_results,
+                false,
+                &extra_args,
+                cli.verbose,
+            )?
         }
 
         Commands::Init {
@@ -4394,7 +4405,7 @@ mod tests {
             Commands::Grep {
                 max, extra_args, ..
             } => {
-                assert_eq!(max, 200, "max must stay at its default, not consume `-m`");
+                assert_eq!(max, None, "max must stay at its default, not consume `-m`");
                 assert_eq!(extra_args, vec!["-m", "5", "pattern", "file"]);
             }
             _ => panic!("Expected Grep command"),
@@ -5870,7 +5881,9 @@ mod tests {
     }
 
     /// Parse `rtk grep …` into the full `Grep` field set for inspection.
-    fn parse_grep(args: &[&str]) -> Result<(usize, usize, bool, Vec<String>), clap::Error> {
+    fn parse_grep(
+        args: &[&str],
+    ) -> Result<(Option<usize>, Option<usize>, bool, Vec<String>), clap::Error> {
         match try_parse_cli_from(args)?.command {
             Commands::Grep {
                 max_len,
@@ -5898,8 +5911,8 @@ mod tests {
             "path",
         ])
         .unwrap();
-        assert_eq!(max_len, 40);
-        assert_eq!(max, 5);
+        assert_eq!(max_len, Some(40));
+        assert_eq!(max, Some(5));
         assert!(context_only);
         assert_eq!(extra_args, vec!["FOO", "path"]);
     }
@@ -5912,8 +5925,8 @@ mod tests {
         let (max_len, _, _, extra_args) =
             parse_grep(&["rtk", "grep", "FOO", "--max-len", "40"]).unwrap();
         assert_eq!(
-            max_len, 80,
-            "option after pattern must NOT bind (default kept)"
+            max_len, None,
+            "option after pattern must NOT bind (config default kept)"
         );
         assert_eq!(extra_args, vec!["FOO", "--max-len", "40"]);
     }

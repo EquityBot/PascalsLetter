@@ -805,12 +805,13 @@ pub fn run(
         None
     };
 
+    let locate = match_locator(&pattern_display);
     let mut by_file: HashMap<String, Vec<(usize, bool, String)>> = HashMap::new();
     for line in raw_output.lines() {
         let Some((file, line_num, is_match, content)) = parse_match_line(line) else {
             continue;
         };
-        let cleaned = clean_line(content, max_line_len, context_re.as_ref(), &pattern_display);
+        let cleaned = clean_line(content, max_line_len, context_re.as_ref(), locate.as_ref());
         by_file
             .entry(file)
             .or_default()
@@ -933,7 +934,9 @@ pub fn run(
         body
     };
 
-    let output = if capped && rtk_output.len() < plain.len() {
+    // Capping hides matches and clips lines, which the agent pays back with a re-run, so the
+    // grouped form must buy a real saving: at least a third of the faithful output.
+    let output = if capped && rtk_output.len() * 3 <= plain.len() * 2 {
         rtk_output
     } else {
         plain
@@ -1138,7 +1141,12 @@ fn has_format_flag<T: AsRef<str>>(engine: Engine, extra_args: &[T]) -> bool {
         .any(|t| is_format_flag_token(engine, t.kind, t.text))
 }
 
-fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {
+fn clean_line(
+    line: &str,
+    max_len: usize,
+    context_re: Option<&Regex>,
+    locate: Option<&Regex>,
+) -> String {
     let trimmed = line.trim();
 
     if let Some(re) = context_re
@@ -1150,38 +1158,46 @@ fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &
         }
     }
 
-    if trimmed.len() <= max_len {
-        trimmed.to_string()
-    } else {
-        let lower = trimmed.to_lowercase();
-        let pattern_lower = pattern.to_lowercase();
-
-        if let Some(pos) = lower.find(&pattern_lower) {
-            let char_pos = lower[..pos].chars().count();
-            let chars: Vec<char> = trimmed.chars().collect();
-            let char_len = chars.len();
-
-            let start = char_pos.saturating_sub(max_len / 3);
-            let end = (start + max_len).min(char_len);
-            let start = if end == char_len {
-                end.saturating_sub(max_len)
-            } else {
-                start
-            };
-
-            let slice: String = chars[start..end].iter().collect();
-            if start > 0 && end < char_len {
-                format!("...{}...", slice)
-            } else if start > 0 {
-                format!("...{}", slice)
-            } else {
-                format!("{}...", slice)
-            }
-        } else {
-            let t: String = trimmed.chars().take(max_len - 3).collect();
-            format!("{}...", t)
-        }
+    let char_len = trimmed.chars().count();
+    if char_len <= max_len {
+        return trimmed.to_string();
     }
+
+    // Place the window on the engine's actual match, not a literal search for the pattern
+    // text, which misses every real regex (`fn\s+run`) and so cut away the very match the
+    // agent searched for. The match offset is taken on the line itself: lowercasing first
+    // can change its length and pushed the window past the end of the line.
+    let Some(char_pos) = locate
+        .and_then(|re| re.find(trimmed))
+        .map(|m| trimmed[..m.start()].chars().count())
+    else {
+        let t: String = trimmed.chars().take(max_len.saturating_sub(3)).collect();
+        return format!("{}...", t);
+    };
+
+    let start = char_pos.saturating_sub(max_len / 3).min(char_len - max_len);
+    let end = start + max_len;
+    let slice: String = trimmed.chars().skip(start).take(max_len).collect();
+    if start > 0 && end < char_len {
+        format!("...{}...", slice)
+    } else if start > 0 {
+        format!("...{}", slice)
+    } else {
+        format!("{}...", slice)
+    }
+}
+
+/// Finds the match a clipped line is centred on. The pattern is in the engine's dialect, so
+/// one that Rust's regex does not accept is located as a literal; case is ignored either way,
+/// since this only places the window.
+fn match_locator(pattern: &str) -> Option<Regex> {
+    let build = |p: &str| {
+        regex::RegexBuilder::new(p)
+            .case_insensitive(true)
+            .build()
+            .ok()
+    };
+    build(pattern).or_else(|| build(&regex::escape(pattern)))
 }
 
 fn compact_path(path: &str) -> String {
@@ -1209,7 +1225,7 @@ mod tests {
     #[test]
     fn test_clean_line() {
         let line = "            const result = someFunction();";
-        let cleaned = clean_line(line, 50, None, "result");
+        let cleaned = clean_line(line, 50, None, match_locator("result").as_ref());
         assert!(!cleaned.starts_with(' '));
         assert!(cleaned.len() <= 50);
     }
@@ -1270,15 +1286,40 @@ mod tests {
     fn test_clean_line_multibyte() {
         // Thai text that exceeds max_len in bytes
         let line = "  สวัสดีครับ นี่คือข้อความที่ยาวมากสำหรับทดสอบ  ";
-        let cleaned = clean_line(line, 20, None, "ครับ");
+        let cleaned = clean_line(line, 20, None, match_locator("ครับ").as_ref());
         // Should not panic
         assert!(!cleaned.is_empty());
     }
 
     #[test]
+    fn test_clean_line_centres_on_a_regex_match() {
+        // A literal search for `fn\s+run` finds nothing, so the old window kept the head of
+        // the line and cut the match away.
+        let line = format!("{} fn   run() {{}}", "x".repeat(200));
+        let cleaned = clean_line(&line, 40, None, match_locator(r"fn\s+run").as_ref());
+        assert!(cleaned.contains("fn   run()"), "{cleaned}");
+        assert!(cleaned.starts_with("..."), "{cleaned}");
+    }
+
+    #[test]
+    fn test_clean_line_survives_lowercase_that_changes_length() {
+        // 'İ' lowercases to two chars; offsets taken on the lowercased copy overshot the line.
+        let line = format!("{}needle{}", "İ".repeat(60), "y".repeat(60));
+        let cleaned = clean_line(&line, 20, None, match_locator("needle").as_ref());
+        assert!(cleaned.contains("needle"), "{cleaned}");
+    }
+
+    #[test]
+    fn test_match_locator_falls_back_to_a_literal() {
+        // In grep's BRE `(` is a literal; Rust's regex rejects it unclosed.
+        let re = match_locator("a(b").expect("literal fallback");
+        assert!(re.is_match("xa(by"));
+    }
+
+    #[test]
     fn test_clean_line_emoji() {
         let line = "🎉🎊🎈🎁🎂🎄 some text 🎃🎆🎇✨";
-        let cleaned = clean_line(line, 15, None, "text");
+        let cleaned = clean_line(line, 15, None, match_locator("text").as_ref());
         assert!(!cleaned.is_empty());
     }
 
