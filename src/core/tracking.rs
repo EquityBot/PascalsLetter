@@ -1227,7 +1227,7 @@ impl Tracker {
         let mut net_saved = 0i64;
         for row in rows {
             let (input, output, time_ms) = row?;
-            if input > HEADLINE_INPUT_CAP_TOKENS {
+            if input.max(output) > HEADLINE_INPUT_CAP_TOKENS {
                 oversized_capped += 1;
             }
             let (input, output) = seen_by_agent(input, output);
@@ -2759,6 +2759,19 @@ mod tests {
     /// Every aggregate counts a row as the agent would have seen it: raw and filtered
     /// output both cut at the cap. So the headline is the sum of the per-command rows,
     /// period tables agree with it, and a command that grew its output costs the total.
+    #[test]
+    fn a_row_capped_on_either_side_counts_once_as_capped() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        let over = HEADLINE_INPUT_CAP_TOKENS + 1;
+        for (input, output) in [(over, 10), (10, over), (over, over), (10, 10)] {
+            tracker
+                .record("x", "rtk x", input, output, 1)
+                .expect("Failed to record row");
+        }
+        let summary = tracker.get_summary().expect("Failed to get summary");
+        assert_eq!(summary.oversized_capped, 3);
+    }
+
     #[test]
     fn oversized_rows_count_at_the_cap_in_every_table() {
         let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
