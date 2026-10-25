@@ -5906,10 +5906,11 @@ mod tests {
         assert_eq!(cat_error_text(&other), "binary file");
     }
 
+    /// `Grep`'s fields: max_len, max, context_only, extra_args.
+    type GrepFields = (Option<usize>, Option<usize>, bool, Vec<String>);
+
     /// Parse `rtk grep …` into the full `Grep` field set for inspection.
-    fn parse_grep(
-        args: &[&str],
-    ) -> Result<(Option<usize>, Option<usize>, bool, Vec<String>), clap::Error> {
+    fn parse_grep(args: &[&str]) -> Result<GrepFields, clap::Error> {
         match try_parse_cli_from(args)?.command {
             Commands::Grep {
                 max_len,
