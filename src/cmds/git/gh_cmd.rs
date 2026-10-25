@@ -7,13 +7,16 @@ use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use crate::core::args_utils;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::{display_args, quote_word, with_args};
+use crate::core::stream::status_to_exit_code;
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ChildArgExt, ok_confirmation, resolved_command, truncate};
+use crate::core::{tee, tracking};
 use crate::git_cmd;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use regex::Regex;
 use serde_json::Value;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::LazyLock;
 
 static HTML_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->").unwrap());
@@ -1131,54 +1134,65 @@ fn pr_action(
 fn run_api(args: &[String], _verbose: u8) -> Result<i32> {
     // gh api is an explicit/advanced command — the user knows what they asked for.
     // Converting JSON to a schema destroys all values and forces Claude to re-fetch, so every
-    // value stays. What goes is GitHub's hypermedia: `*_url` templates pointing back into
-    // api.github.com, derivable from the object's own `url`, and up to 70% of a repository,
-    // pull request or workflow-run object. A `--jq`/`--template` result is what the user
-    // selected, so it passes through untouched.
+    // value stays. What goes is GitHub's hypermedia: `*_url` links back into api.github.com,
+    // up to 70% of a repository, pull request or workflow-run object. The whole response is
+    // stored for `rtk recall`, so nothing needs a rerun (which could repeat a POST). A
+    // `--jq`/`--template` result is what the user selected, so it passes through untouched,
+    // as does anything not filtered: stdout is written back byte for byte, uncapped.
     if args.iter().any(|a| is_api_selection_flag(a)) {
         return run_passthrough("gh", "api", args);
     }
+    let timer = tracking::TimedExecution::start();
+    let tracked = with_args("gh api", &display_args(args));
     let mut cmd = resolved_command("gh");
-    cmd.arg("api").child_args(args);
-    runner::run_filtered(
-        cmd,
-        "gh",
-        &with_args("api", &display_args(args)),
-        drop_api_links,
-        RunOptions::stdout_only()
-            .inherit_stdin()
-            .early_exit_on_failure(),
-    )
+    cmd.arg("api")
+        .child_args(args)
+        .stdin(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let output = cmd.output().context("Failed to run gh api")?;
+    let filtered = std::str::from_utf8(&output.stdout)
+        .ok()
+        .filter(|_| output.status.success())
+        .and_then(|raw| Some((raw, drop_api_links(raw)?)));
+    let mut stdout = std::io::stdout().lock();
+    match filtered {
+        Some((raw, (compact, dropped))) => {
+            let hint = tee::force_tee_hint(raw, "gh-api")
+                .unwrap_or_else(|| "`rtk bypass gh api ...` for all".to_string());
+            writeln!(stdout, "{compact}")?;
+            stdout.flush()?;
+            eprintln!("[rtk] dropped {dropped} {GITHUB_API} *_url links; {hint}");
+            timer.track(&tracked, &format!("rtk {tracked}"), raw, &compact);
+        }
+        None => {
+            stdout.write_all(&output.stdout)?;
+            stdout.flush()?;
+            timer.track_passthrough(&tracked, &format!("rtk {tracked}"));
+        }
+    }
+    Ok(status_to_exit_code(output.status))
 }
 
+/// `--jq`/`-q` and `--template`/`-t` in any spelling gh's flag parser takes: separate value,
+/// `=value`, or a short flag with its value attached (`-q.owner`).
 fn is_api_selection_flag(arg: &str) -> bool {
-    matches!(arg, "-q" | "--jq" | "-t" | "--template")
-        || arg.starts_with("--jq=")
-        || arg.starts_with("--template=")
+    arg.starts_with("--jq")
+        || arg.starts_with("--template")
+        || (arg.starts_with("-q") || arg.starts_with("-t")) && !arg.starts_with("--")
 }
 
 const GITHUB_API: &str = "https://api.github.com/";
 
-/// The response without its api.github.com `*_url` links, with a one-line note on stderr of
-/// how many went. Anything that is not a single JSON document (`--include` headers,
-/// `--paginate` pages) is returned as it came.
-fn drop_api_links(stdout: &str) -> String {
-    let Ok(mut value) = serde_json::from_str::<Value>(stdout) else {
-        return stdout.to_string();
-    };
+/// The response without its api.github.com `*_url` links, and how many went. `None` when
+/// nothing went or the output is not a single JSON document (`--include` headers,
+/// `--paginate` pages without `--slurp`).
+fn drop_api_links(stdout: &str) -> Option<(String, usize)> {
+    let mut value = serde_json::from_str::<Value>(stdout).ok()?;
     let dropped = strip_api_links(&mut value);
     if dropped == 0 {
-        return stdout.to_string();
+        return None;
     }
-    match serde_json::to_string(&value) {
-        Ok(compact) => {
-            eprintln!(
-                "[rtk] dropped {dropped} {GITHUB_API} *_url links; `rtk bypass gh api ...` for all"
-            );
-            compact
-        }
-        Err(_) => stdout.to_string(),
-    }
+    Some((serde_json::to_string(&value).ok()?, dropped))
 }
 
 fn strip_api_links(value: &mut Value) -> usize {
@@ -1217,7 +1231,8 @@ mod tests {
     #[test]
     fn test_drop_api_links_keeps_every_value_but_api_hypermedia() {
         let raw = r#"{"id":1,"url":"https://api.github.com/repos/o/r","html_url":"https://github.com/o/r","forks_url":"https://api.github.com/repos/o/r/forks","clone_url":"https://github.com/o/r.git","download_url":"https://raw.githubusercontent.com/o/r/x","owner":{"login":"o","repos_url":"https://api.github.com/users/o/repos"},"items":[{"events_url":"https://api.github.com/x{/y}","note":"<b>"}],"homepage_url":null}"#;
-        let out = drop_api_links(raw);
+        let (out, dropped) = drop_api_links(raw).expect("links dropped");
+        assert_eq!(dropped, 3);
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(
             v,
@@ -1239,9 +1254,9 @@ mod tests {
     #[test]
     fn test_drop_api_links_leaves_non_json_and_link_free_output_alone() {
         let paged = "[{\"a\":1}][{\"b\":2}]";
-        assert_eq!(drop_api_links(paged), paged);
+        assert_eq!(drop_api_links(paged), None);
         let plain = "{\"name\": \"x\"}\n";
-        assert_eq!(drop_api_links(plain), plain);
+        assert_eq!(drop_api_links(plain), None);
     }
 
     #[test]
@@ -1253,10 +1268,13 @@ mod tests {
             "-t",
             "--template",
             "--template={{.x}}",
+            "-q.owner",
+            "-q=.owner",
+            "-t{{.x}}",
         ] {
             assert!(is_api_selection_flag(flag), "{flag}");
         }
-        for other in ["--paginate", "-i", "repos/o/r", "-f"] {
+        for other in ["--paginate", "--slurp", "-i", "repos/o/r", "-f", "-X"] {
             assert!(!is_api_selection_flag(other), "{other}");
         }
     }
