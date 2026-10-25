@@ -1703,8 +1703,16 @@ mod tests {
     fn test_locator_for_grep_serves_only_the_c_locale() {
         let patterns = ["needle".to_string()];
         let grep = || locator_for(Engine::Grep, &["needle"], &patterns);
-        assert!(grep().is_some());
-        assert!(user_env::with_vars(&[("LANG", Some("C.UTF-8"))], grep).is_none());
+        let locale = |lang| {
+            [
+                ("LC_ALL", None),
+                ("LC_CTYPE", None),
+                ("LC_COLLATE", None),
+                ("LANG", lang),
+            ]
+        };
+        assert!(user_env::with_vars(&locale(Some("C")), grep).is_some());
+        assert!(user_env::with_vars(&locale(Some("C.UTF-8")), grep).is_none());
         let rg = || locator_for(Engine::Rg, &["needle"], &patterns);
         assert!(user_env::with_vars(&[("LANG", Some("C.UTF-8"))], rg).is_some());
     }

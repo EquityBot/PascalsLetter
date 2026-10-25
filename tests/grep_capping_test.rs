@@ -140,13 +140,15 @@ fn assert_every_clip_keeps_in(
     wanted: &str,
 ) {
     // CI runners have grep but not always rg; a case for a missing engine has nothing to test.
-    let engine_runs = std::process::Command::new(args[0])
+    let probe = std::process::Command::new(args[0])
         .arg("--version")
-        .output()
-        .is_ok_and(|o| o.status.success());
-    if !engine_runs {
-        eprintln!("skipped: {} is not installed", args[0]);
-        return;
+        .output();
+    if let Err(error) = probe {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            eprintln!("skipped: {} is not installed", args[0]);
+            return;
+        }
+        panic!("cannot start {}: {error}", args[0]);
     }
     let dir = tempfile::tempdir().expect("test setup");
     let body: String = (0..400).map(|i| line(i) + "\n").collect();
