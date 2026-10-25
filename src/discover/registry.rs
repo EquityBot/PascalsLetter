@@ -4,7 +4,7 @@ use crate::cmds::system::search::{Engine, is_bare_file_list};
 use crate::core::utils::composer_bin_dirs;
 use regex::{Regex, RegexSet};
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 use super::lexer::{
     ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer, coalesce_words,
@@ -57,12 +57,14 @@ pub fn category_avg_tokens(category: &str, subcmd: &str) -> usize {
 static REGEX_SET: LazyLock<RegexSet> = LazyLock::new(|| {
     RegexSet::new(RULES.iter().map(|r| r.pattern)).expect("invalid regex patterns")
 });
-static COMPILED: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    RULES
-        .iter()
-        .map(|r| Regex::new(r.pattern).expect("invalid regex"))
-        .collect()
-});
+/// Each rule's own regex, compiled the first time that rule matches: the hook runs once per
+/// command, so compiling all of them up front cost about 12 ms of every Bash call.
+static COMPILED: LazyLock<Vec<OnceLock<Regex>>> =
+    LazyLock::new(|| RULES.iter().map(|_| OnceLock::new()).collect());
+
+fn compiled(idx: usize) -> &'static Regex {
+    COMPILED[idx].get_or_init(|| Regex::new(RULES[idx].pattern).expect("invalid regex"))
+}
 static ENV_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
     // NOTE: `sudo` is intentionally NOT stripped here. Rewriting `sudo docker ps`
     // to `sudo rtk docker ps` breaks at runtime because `rtk` is not on root's
@@ -262,7 +264,7 @@ pub fn classify_command(cmd: &str) -> Classification {
         let rule = &RULES[idx];
 
         // Extract subcommand for savings override and status detection
-        let (savings, status) = if let Some(caps) = COMPILED[idx].captures(cmd_clean) {
+        let (savings, status) = if let Some(caps) = compiled(idx).captures(cmd_clean) {
             if let Some(sub) = caps.get(1) {
                 // Collapse internal whitespace so a two-word capture ("pm  ls")
                 // still matches its single-spaced key in the tables below.
@@ -8606,5 +8608,15 @@ mod tests {
             rewrite_command_no_prefixes("bash -c 'git status && bash -c \"cargo test\"'", &[]),
             Some("bash -c 'rtk git status && bash -c \"cargo test\"'".into())
         );
+    }
+}
+
+#[cfg(test)]
+mod compiled_tests {
+    #[test]
+    fn every_rule_regex_compiles() {
+        for idx in 0..super::RULES.len() {
+            let _ = super::compiled(idx);
+        }
     }
 }
