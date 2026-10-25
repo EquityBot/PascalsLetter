@@ -226,6 +226,34 @@ fn a_whole_line_match_keeps_the_line() {
 }
 
 #[test]
+fn a_very_long_unlocated_line_is_cut_and_says_so() {
+    // -w gets no locator; a 20,000-char line kept whole would swamp the agent's cap.
+    let dir = tempfile::tempdir().expect("test setup");
+    let body: String = (0..400)
+        .map(|i| format!("{} needle {i}\n", "f".repeat(20_000)))
+        .collect();
+    std::fs::write(dir.path().join("long.txt"), body).expect("test setup");
+
+    let out = common::rtk_command()
+        .args(["grep", "-w", "needle", "long.txt"])
+        .current_dir(dir.path())
+        .output()
+        .expect("rtk");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        stdout.starts_with("400 matches in 1 files:"),
+        "{stdout:.300}"
+    );
+    assert!(stdout.chars().count() <= 30_000, "{} chars", stdout.len());
+    let shown: Vec<&str> = stdout.lines().filter(|l| l.contains("fff")).collect();
+    assert!(!shown.is_empty(), "{stdout:.300}");
+    for l in shown {
+        assert!(l.ends_with("chars; match not shown]"), "{l:.300}");
+    }
+}
+
+#[test]
 fn a_match_longer_than_the_window_keeps_its_end() {
     let line = |i| format!("{} needle {} {i}", "f".repeat(240), "g".repeat(240));
     assert_every_clip_keeps(&["rg", ".*needle"], line, "needle");

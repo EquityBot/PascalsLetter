@@ -1148,6 +1148,9 @@ fn has_format_flag<T: AsRef<str>>(engine: Engine, extra_args: &[T]) -> bool {
         .any(|t| is_format_flag_token(engine, t.kind, t.text))
 }
 
+/// An unlocated line up to this many clip windows long is shown whole.
+const UNLOCATED_WHOLE_WINDOWS: usize = 4;
+
 fn clean_line(
     line: &str,
     max_len: usize,
@@ -1175,7 +1178,9 @@ fn clean_line(
     // agent searched for. The match offset is taken on the line itself: lowercasing first
     // can change its length and pushed the window past the end of the line.
     // No trustworthy position (PCRE, `-w`, a mid-pattern BRE `^`), or a match too long for
-    // the window: a clip could cut away the match, so the line stays whole.
+    // the window: a clip could cut away the match, so the line stays whole. Past a few
+    // windows (minified code, data) a whole line would swamp the agent's output cap, so it
+    // is cut at the head and says the match is not shown.
     let Some((match_start, match_end)) = locate
         .and_then(|re| re.find(trimmed))
         .map(|m| {
@@ -1184,7 +1189,11 @@ fn clean_line(
         })
         .filter(|(start, end)| end - start <= max_len)
     else {
-        return trimmed.to_string();
+        if char_len <= UNLOCATED_WHOLE_WINDOWS * max_len {
+            return trimmed.to_string();
+        }
+        let head: String = trimmed.chars().take(max_len).collect();
+        return format!("{head}... [+{} chars; match not shown]", char_len - max_len);
     };
 
     // The whole match inside the window, a third of it ahead of the match where room allows.
@@ -1586,7 +1595,12 @@ mod tests {
     fn test_clean_line_keeps_a_line_whole_without_a_located_match() {
         let line = format!("{} a^b {}", "f".repeat(100), "g".repeat(100));
         let re = match_locator(&["a^b".to_string()], PatternDialect::Basic, false);
-        assert_eq!(clean_line(&line, 40, None, re.as_ref()), line);
+        assert_eq!(clean_line(&line, 60, None, re.as_ref()), line);
+        // Past 4 windows the head is kept and the clip says the match is not in it.
+        assert_eq!(
+            clean_line(&line, 40, None, re.as_ref()),
+            format!("{}... [+165 chars; match not shown]", "f".repeat(40))
+        );
     }
 
     #[test]
