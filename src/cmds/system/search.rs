@@ -40,10 +40,19 @@ fn stdin_is_readable() -> bool {
         .unwrap_or(false)
 }
 
-/// KNOWN LIMITATION: no portable file-type check here, so Windows keeps the wider
-/// `!is_terminal()` rule -- `rtk rg foo < NUL` still routes to the streaming path and drops
-/// filenames there.
-#[cfg(not(unix))]
+/// Windows: ripgrep's own rule (`grep_cli::is_readable_stdin`), through the same crate -- not
+/// a terminal (std counts an MSYS pty pipe as one), and a disk file or a pipe. `NUL` is a
+/// character device, so the wider `!is_terminal()` sent `rtk rg foo < NUL` down the stdin
+/// path and dropped the filenames of a search that rg actually ran over the cwd.
+#[cfg(windows)]
+fn stdin_is_readable() -> bool {
+    !std::io::stdin().is_terminal()
+        && winapi_util::file::typ(winapi_util::HandleRef::stdin())
+            .map(|t| t.is_disk() || t.is_pipe())
+            .unwrap_or(false)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn stdin_is_readable() -> bool {
     !std::io::stdin().is_terminal()
 }

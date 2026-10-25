@@ -1283,6 +1283,7 @@ dependencies = [
  "ureq",
  "walkdir",
  "which",
+ "winapi-util",
  "windows-sys 0.61.2",
 ]
 

@@ -1,4 +1,3 @@
-#![cfg(unix)]
 //! Which stdin the engines actually read. These run in CI as integration tests rather than
 //! `#[ignore]`d unit tests: cargo guarantees a built binary here, so the fix they
 //! cover is exercised by `cargo test --all` instead of only by a flag nobody passes.
