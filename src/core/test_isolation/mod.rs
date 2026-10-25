@@ -600,7 +600,7 @@ fn a_child_keeps_none_of_the_shell_settings() {
 /// Variables rtk reads only to read text as the engine it runs does, which inherits the
 /// same value: the locale grep matches in. A child keeps them, as its tools do, so a test
 /// pins them for both or neither.
-const MIRRORED: [&str; 3] = ["LC_ALL", "LC_CTYPE", "LANG"];
+const MIRRORED: [&str; 4] = ["LC_ALL", "LC_CTYPE", "LC_COLLATE", "LANG"];
 
 /// `user_env` keeps a test on its own side, but a spawned rtk is built without
 /// `cfg(test)` and obeys whatever it inherits. Every variable rtk reads must

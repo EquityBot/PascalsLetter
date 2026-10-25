@@ -243,6 +243,14 @@ fn a_mid_pattern_bre_caret_keeps_its_match() {
 }
 
 #[test]
+fn an_anchor_is_not_matched_after_trimming() {
+    // grep sees the leading spaces, so `^foo` is no match; the line matched on `needle`.
+    let line = |i| format!("  foo {} needle {} {i}", "f".repeat(240), "g".repeat(240));
+    assert_every_clip_keeps(&["grep", "-E", "^foo|needle"], line, " needle ");
+    assert_every_clip_keeps(&["rg", "^foo|needle"], line, " needle ");
+}
+
+#[test]
 fn a_c_locale_space_class_keeps_its_match() {
     // In the C locale grep's `\s` is ASCII; an EM SPACE before `needle` is no match (the
     // leading `x` keeps it from being trimmed off the line).

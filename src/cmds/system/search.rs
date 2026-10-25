@@ -1181,8 +1181,13 @@ fn clean_line(
     // the window: a clip could cut away the match, so the line stays whole. Past a few
     // windows (minified code, data) a whole line would swamp the agent's output cap, so it
     // is cut at the head and says the match may lie past the cut.
+    // The match is found on the line as the engine saw it: trimmed first, `^foo` would match
+    // a line that starts with spaces. A match reaching into the trimmed ends counts as none.
+    let lead = line.chars().count() - line.trim_start().chars().count();
     let Some((match_start, match_end)) = locate
-        .and_then(|re| re.find_chars(trimmed))
+        .and_then(|re| re.find_chars(line))
+        .filter(|&(start, end)| start >= lead && end <= lead + char_len)
+        .map(|(start, end)| (start - lead, end - lead))
         .filter(|(start, end)| end - start <= max_len)
     else {
         if char_len <= UNLOCATED_WHOLE_WINDOWS * max_len {
@@ -1296,11 +1301,9 @@ fn ignores_case<T: AsRef<str>>(engine: Engine, args: &[T]) -> bool {
 /// ends (literal to grep, an anchor to Rust), and inside a bracket expression a backslash, a
 /// nested `[` or Rust's `&&`/`--`/`~~` set operators, all literal to grep.
 ///
-/// `unicode` is for a UTF-8 locale, where the result runs as a Unicode regex: there Rust's
-/// `\w \s \b \< \>` classes are wider than grep's and its POSIX classes ASCII only, so word
-/// and space escapes and negated POSIX classes are refused too. In the C locale the result
-/// runs on bytes with Unicode off, which reads them all as grep does.
-fn posix_to_regex(pattern: &str, basic: bool, unicode: bool) -> Option<String> {
+/// The result runs on bytes with Unicode off, as grep reads text in the C locale, the only
+/// one the grep locator serves.
+fn posix_to_regex(pattern: &str, basic: bool) -> Option<String> {
     const SWAPPED: &str = "+?|(){}";
     const WORD_AND_SPACE: &str = "wWsSbB<>";
     let mut out = String::with_capacity(pattern.len() + 8);
@@ -1309,7 +1312,6 @@ fn posix_to_regex(pattern: &str, basic: bool, unicode: bool) -> Option<String> {
         match c {
             '\\' => match chars.next()? {
                 n if SWAPPED.contains(n) && basic => out.push(n),
-                n if WORD_AND_SPACE.contains(n) && unicode => return None,
                 // Rust's `\b{start}` and kin; GNU reads `{` there as a literal.
                 'b' | 'B' if chars.peek() == Some(&'{') => return None,
                 '`' | '\'' => return None,
@@ -1323,8 +1325,7 @@ fn posix_to_regex(pattern: &str, basic: bool, unicode: bool) -> Option<String> {
             '$' if basic && chars.peek().is_some() => return None,
             '[' => {
                 out.push('[');
-                let negated = chars.peek() == Some(&'^');
-                if negated {
+                if chars.peek() == Some(&'^') {
                     out.push(chars.next()?);
                 }
                 if chars.peek() == Some(&']') {
@@ -1335,7 +1336,6 @@ fn posix_to_regex(pattern: &str, basic: bool, unicode: bool) -> Option<String> {
                     match chars.next()? {
                         ']' => break,
                         '\\' => return None,
-                        '[' if chars.peek() == Some(&':') && negated && unicode => return None,
                         '[' if chars.peek() == Some(&':') => {
                             out.push('[');
                             for k in chars.by_ref() {
@@ -1364,30 +1364,33 @@ fn posix_to_regex(pattern: &str, basic: bool, unicode: bool) -> Option<String> {
     (!out.contains("{,")).then_some(out)
 }
 
-/// How the engine reads text: rg always as Unicode; grep by its locale's character type.
+/// How the engine reads text.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Charset {
-    /// The C locale: one byte per character, ASCII classes and case.
+    /// grep in the C locale: one byte per character, ASCII classes, case and ranges.
     Bytes,
+    /// rg, always.
     Utf8,
 }
 
-/// grep's character type from the locale it inherits: the first non-empty of `LC_ALL`,
-/// `LC_CTYPE` and `LANG`, the C locale when all are unset. `None` for any other encoding.
-fn grep_charset() -> Option<Charset> {
-    let locale = [
-        user_env::var("LC_ALL"),
-        user_env::var("LC_CTYPE"),
-        user_env::var("LANG"),
+/// Whether grep runs in the C locale, by what it inherits: the first non-empty of `LC_ALL`,
+/// `LC_CTYPE` and `LANG` for its character type, and of `LC_ALL`, `LC_COLLATE` and `LANG`
+/// for its bracket ranges, each C or POSIX or unset (agent shells set none). A UTF-8 or
+/// other locale is not modelled: its classes, case folding and ranges follow tables Rust
+/// does not share, and a missing one falls back to C without saying so.
+fn grep_in_c_locale() -> bool {
+    let effective = |category: Option<String>| {
+        [user_env::var("LC_ALL"), category, user_env::var("LANG")]
+            .into_iter()
+            .flatten()
+            .find(|v| !v.is_empty())
+    };
+    [
+        effective(user_env::var("LC_CTYPE")),
+        effective(user_env::var("LC_COLLATE")),
     ]
-    .into_iter()
-    .flatten()
-    .find(|v| !v.is_empty());
-    match locale.as_deref() {
-        None | Some("C" | "POSIX") => Some(Charset::Bytes),
-        Some(l) if l.to_ascii_lowercase().replace('-', "").contains("utf8") => Some(Charset::Utf8),
-        _ => None,
-    }
+    .iter()
+    .all(|v| matches!(v.as_deref(), None | Some("C" | "POSIX")))
 }
 
 /// The match a clipped line is centred on.
@@ -1429,13 +1432,12 @@ fn match_locator(
     if pieces.is_empty() {
         return None;
     }
-    let unicode = charset == Charset::Utf8;
     let translated = pieces
         .iter()
         .map(|p| match dialect {
             PatternDialect::Fixed => Some(regex::escape(p)),
-            PatternDialect::Basic => posix_to_regex(p, true, unicode),
-            PatternDialect::Extended => posix_to_regex(p, false, unicode),
+            PatternDialect::Basic => posix_to_regex(p, true),
+            PatternDialect::Extended => posix_to_regex(p, false),
             PatternDialect::Regex => Some(p.to_string()),
             PatternDialect::Pcre => None,
         })
@@ -1459,7 +1461,7 @@ fn match_locator(
 
 /// The locator for this search, or none where its matches could differ from the engine's:
 /// PCRE; `-w` and `-x`, whose word and line boundaries the locator does not model; rg's
-/// `--no-unicode`; and grep in a locale that is neither C nor UTF-8.
+/// `--no-unicode`; and grep outside the C locale.
 fn locator_for<T: AsRef<str>>(engine: Engine, args: &[T], patterns: &[String]) -> Option<Locator> {
     let tokens = tokenize_search_args(args, engine);
     let unmodelled = arg_tokenizer::before_dashdash(&tokens).iter().any(|t| {
@@ -1471,7 +1473,8 @@ fn locator_for<T: AsRef<str>>(engine: Engine, args: &[T], patterns: &[String]) -
         return None;
     }
     let charset = match engine {
-        Engine::Grep => grep_charset()?,
+        Engine::Grep if grep_in_c_locale() => Charset::Bytes,
+        Engine::Grep => return None,
         Engine::Rg => Charset::Utf8,
     };
     match_locator(
@@ -1614,22 +1617,27 @@ mod tests {
     }
 
     #[test]
-    fn test_grep_charset_follows_the_locale() {
+    fn test_grep_in_c_locale_needs_c_character_type_and_collation() {
         use user_env::with_vars;
-        let at = |all, ctype, lang| {
+        let at = |all, ctype, collate, lang| {
             with_vars(
-                &[("LC_ALL", all), ("LC_CTYPE", ctype), ("LANG", lang)],
-                grep_charset,
+                &[
+                    ("LC_ALL", all),
+                    ("LC_CTYPE", ctype),
+                    ("LC_COLLATE", collate),
+                    ("LANG", lang),
+                ],
+                grep_in_c_locale,
             )
         };
-        assert_eq!(at(None, None, None), Some(Charset::Bytes));
-        assert_eq!(at(None, None, Some("C.UTF-8")), Some(Charset::Utf8));
-        assert_eq!(
-            at(Some("C"), None, Some("en_AU.UTF-8")),
-            Some(Charset::Bytes)
-        );
-        assert_eq!(at(Some(""), Some("en_AU.utf8"), None), Some(Charset::Utf8));
-        assert_eq!(at(None, None, Some("en_AU.ISO-8859-1")), None);
+        assert!(at(None, None, None, None));
+        assert!(at(None, Some("POSIX"), Some("C"), None));
+        assert!(at(Some("C"), None, None, Some("en_AU.UTF-8")));
+        assert!(at(Some(""), None, None, None));
+        assert!(!at(None, None, None, Some("C.UTF-8")));
+        assert!(!at(None, Some("en_AU.UTF-8"), None, None));
+        // Ranges follow LC_COLLATE even when the character type is C.
+        assert!(!at(None, Some("C"), Some("en_AU.UTF-8"), None));
     }
 
     #[test]
@@ -1689,6 +1697,30 @@ mod tests {
         assert!(locator_for(Engine::Grep, &["-Fx", "needle"], &patterns).is_none());
         assert!(locator_for(Engine::Rg, &["--line-regexp", "needle"], &patterns).is_none());
         assert!(locator_for(Engine::Rg, &["needle"], &patterns).is_some());
+    }
+
+    #[test]
+    fn test_locator_for_grep_serves_only_the_c_locale() {
+        let patterns = ["needle".to_string()];
+        let grep = || locator_for(Engine::Grep, &["needle"], &patterns);
+        assert!(grep().is_some());
+        assert!(user_env::with_vars(&[("LANG", Some("C.UTF-8"))], grep).is_none());
+        let rg = || locator_for(Engine::Rg, &["needle"], &patterns);
+        assert!(user_env::with_vars(&[("LANG", Some("C.UTF-8"))], rg).is_some());
+    }
+
+    #[test]
+    fn test_clean_line_locates_on_the_line_as_the_engine_saw_it() {
+        // grep saw the leading spaces, so `^foo` is no match; `needle` is.
+        let line = format!("  foo {} needle {}", "f".repeat(240), "g".repeat(240));
+        let re = match_locator(
+            &["^foo|needle".to_string()],
+            PatternDialect::Extended,
+            false,
+            Charset::Bytes,
+        );
+        let clipped = clean_line(&line, 160, None, re.as_ref());
+        assert!(clipped.contains(" needle "), "{clipped}");
     }
 
     #[test]
@@ -1763,10 +1795,8 @@ mod tests {
 
     #[test]
     fn test_posix_to_regex_swaps_bre_operators_and_refuses_what_differs() {
-        let bre = |p| posix_to_regex(p, true, false);
-        let ere = |p| posix_to_regex(p, false, false);
-        let bre_utf8 = |p| posix_to_regex(p, true, true);
-        let ere_utf8 = |p| posix_to_regex(p, false, true);
+        let bre = |p| posix_to_regex(p, true);
+        let ere = |p| posix_to_regex(p, false);
         // A BRE `^` or `$` is an anchor only at the pattern's ends; GNU reads it as a literal
         // elsewhere. An ERE's are anchors anywhere, as in Rust.
         assert_eq!(bre("^a$").as_deref(), Some("^a$"));
@@ -1776,15 +1806,8 @@ mod tests {
         // GNU's `{,n}` interval, and Rust's `\b{start}`, which GNU reads as a literal brace.
         assert_eq!(ere("a{,2}b"), None);
         assert_eq!(bre(r"a\{,2\}b"), None);
-        assert_eq!(ere_utf8(r"\b{start}foo"), None);
         assert_eq!(ere(r"\b{start}foo"), None);
         assert_eq!(ere(r"\bfoo\b").as_deref(), Some(r"\bfoo\b"));
-        // In a UTF-8 locale Rust's word and space classes are wider than grep's, and its
-        // POSIX classes ASCII only, so their negation is wider too.
-        for p in [r"\w", r"\s", r"\bx", r"\<x", "[^[:alpha:]]x"] {
-            assert_eq!(bre_utf8(p), None, "{p}");
-        }
-        assert_eq!(bre_utf8("[[:alpha:]]x").as_deref(), Some("[[:alpha:]]x"));
         assert_eq!(bre("[^[:alpha:]]x").as_deref(), Some("[^[:alpha:]]x"));
         assert_eq!(bre(r"a\+b").as_deref(), Some("a+b"));
         assert_eq!(bre(r"f(x)\|g\{2\}").as_deref(), Some(r"f\(x\)|g{2}"));
