@@ -130,6 +130,28 @@ fn links_stay_when_the_response_cannot_be_stored() {
     assert!(!String::from_utf8_lossy(&out.stderr).contains("dropped"));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_gh_killed_by_a_signal_exits_as_a_shell_reports_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let body = dir.path().join("body.bin");
+    fs::write(&body, LINKED).expect("write payload");
+    let gh = dir.path().join("gh");
+    fs::write(
+        &gh,
+        format!("#!/bin/sh\ncat '{}'\nkill -TERM $$\n", body.display()),
+    )
+    .expect("write fake gh");
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("chmod fake gh");
+
+    let out = rtk_with(dir.path(), &["gh", "api", "repos/los-pollos/hermanos"]);
+
+    // 128 + SIGTERM (15), as sh reports a child the signal ended.
+    assert_eq!(out.status.code(), Some(143));
+    assert_eq!(out.stdout, LINKED, "a failed call was filtered");
+}
+
 #[test]
 fn links_stay_when_the_recall_store_cannot_be_written() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -144,13 +166,26 @@ fn links_stay_when_the_recall_store_cannot_be_written() {
         std::env::var("PATH").unwrap_or_default()
     );
 
-    let out = common::rtk_command()
-        .args(["gh", "api", "repos/los-pollos/hermanos"])
-        .env("PATH", path)
-        .env("RTK_RECALL_DB", blocker.join("recall.db"))
-        .output()
-        .expect("run rtk");
+    let run = |store: &Path| {
+        common::rtk_command()
+            .args(["gh", "api", "repos/los-pollos/hermanos"])
+            .env("PATH", &path)
+            .env_remove("RTK_RECALL")
+            .env_remove("RTK_TEE")
+            .env("RTK_RECALL_DB", store)
+            .output()
+            .expect("run rtk")
+    };
 
+    // Control: the same store override, writable, stores the response and drops the links.
+    let stored = run(&dir.path().join("recall.db"));
+    assert!(
+        String::from_utf8_lossy(&stored.stderr).contains("dropped"),
+        "control did not filter: {}",
+        String::from_utf8_lossy(&stored.stderr)
+    );
+
+    let out = run(&blocker.join("recall.db"));
     assert_eq!(out.status.code(), Some(0));
     assert_eq!(out.stdout, LINKED, "filtered although nothing was stored");
     assert!(!String::from_utf8_lossy(&out.stderr).contains("dropped"));
