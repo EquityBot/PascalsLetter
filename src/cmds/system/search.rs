@@ -1209,7 +1209,9 @@ enum PatternDialect {
     Fixed,
     /// grep's default BRE, where `\+ \? \| \( \) \{ \}` are the operators.
     Basic,
-    /// rg's Rust regex, or grep's ERE, close enough to it to place a window.
+    /// grep -E: bare operators as in Rust, but its escapes and bracket expressions differ.
+    Extended,
+    /// rg's Rust regex.
     Regex,
     /// grep -P and rg's PCRE2 engine: lookaround and other syntax Rust's regex lacks.
     Pcre,
@@ -1221,32 +1223,41 @@ fn pattern_dialect<T: AsRef<str>>(engine: Engine, args: &[T]) -> PatternDialect 
         Engine::Grep => PatternDialect::Basic,
         Engine::Rg => PatternDialect::Regex,
     };
+    // rg keeps -F apart from the engine: -F wins over any engine until --no-fixed-strings.
+    let mut rg_fixed = false;
     for t in arg_tokenizer::before_dashdash(&tokens) {
-        dialect = match (engine, t.kind, t.text) {
-            (_, TokenKind::Short, "F") | (_, TokenKind::Long, "fixed-strings") => {
-                PatternDialect::Fixed
+        match (engine, t.kind, t.text) {
+            (Engine::Rg, TokenKind::Short, "F")
+            | (Engine::Rg, TokenKind::Long, "fixed-strings") => rg_fixed = true,
+            (Engine::Rg, TokenKind::Long, "no-fixed-strings") => rg_fixed = false,
+            (Engine::Rg, TokenKind::Short, "P") | (Engine::Rg, TokenKind::Long, "pcre2") => {
+                dialect = PatternDialect::Pcre
             }
-            (Engine::Grep, TokenKind::Short, "G")
-            | (Engine::Grep, TokenKind::Long, "basic-regexp") => PatternDialect::Basic,
-            (Engine::Grep, TokenKind::Short, "E")
-            | (Engine::Grep, TokenKind::Long, "extended-regexp")
-            | (Engine::Rg, TokenKind::Long, "no-fixed-strings" | "no-pcre2") => {
-                PatternDialect::Regex
-            }
-            (Engine::Grep, TokenKind::Short, "P")
-            | (Engine::Grep, TokenKind::Long, "perl-regexp")
-            | (Engine::Rg, TokenKind::Short, "P")
-            | (Engine::Rg, TokenKind::Long, "pcre2") => PatternDialect::Pcre,
+            (Engine::Rg, TokenKind::Long, "no-pcre2") => dialect = PatternDialect::Regex,
             (Engine::Rg, TokenKind::Long, "engine") => {
-                match t.attached.or_else(|| t.value(&tokens)) {
+                dialect = match t.attached.or_else(|| t.value(&tokens)) {
                     Some("default") => PatternDialect::Regex,
                     _ => PatternDialect::Pcre,
                 }
             }
-            _ => dialect,
-        };
+            (Engine::Grep, TokenKind::Short, "F")
+            | (Engine::Grep, TokenKind::Long, "fixed-strings") => dialect = PatternDialect::Fixed,
+            (Engine::Grep, TokenKind::Short, "G")
+            | (Engine::Grep, TokenKind::Long, "basic-regexp") => dialect = PatternDialect::Basic,
+            (Engine::Grep, TokenKind::Short, "E")
+            | (Engine::Grep, TokenKind::Long, "extended-regexp") => {
+                dialect = PatternDialect::Extended
+            }
+            (Engine::Grep, TokenKind::Short, "P")
+            | (Engine::Grep, TokenKind::Long, "perl-regexp") => dialect = PatternDialect::Pcre,
+            _ => {}
+        }
     }
-    dialect
+    if rg_fixed {
+        PatternDialect::Fixed
+    } else {
+        dialect
+    }
 }
 
 /// Whether the engine ignores case, by the user's own flags (the last one wins). Smart case
@@ -1268,69 +1279,108 @@ fn ignores_case<T: AsRef<str>>(engine: Engine, args: &[T]) -> bool {
     ignore
 }
 
-/// A BRE as the equivalent Rust regex: the escaped and bare forms of `+ ? | ( ) { }` swap.
-fn bre_to_regex(pattern: &str) -> String {
+/// A grep pattern as the equivalent Rust regex. In a BRE (`basic`) the escaped and bare forms
+/// of `+ ? | ( ) { }` swap; an ERE keeps them.
+///
+/// `None` for anything the two could read differently: an escape GNU grep does not define as
+/// Rust does (`\d`, `\x41`, back-references, the buffer anchors `` \` `` and `\'`), an ERE
+/// `(?` (a Rust flag group), and inside a bracket expression a backslash, a nested `[` or
+/// Rust's `&&`/`--`/`~~` set operators, all literal to grep.
+fn posix_to_regex(pattern: &str, basic: bool) -> Option<String> {
     const SWAPPED: &str = "+?|(){}";
+    const SAME_LETTERS: &str = "wWsSbB";
     let mut out = String::with_capacity(pattern.len() + 8);
-    let mut chars = pattern.chars();
+    let mut chars = pattern.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '\\' => match chars.next() {
-                Some(n) if SWAPPED.contains(n) => out.push(n),
-                Some(n) => {
+            '\\' => match chars.next()? {
+                n if SWAPPED.contains(n) && basic => out.push(n),
+                '`' | '\'' => return None,
+                n if n.is_ascii_punctuation() || SAME_LETTERS.contains(n) => {
                     out.push('\\');
                     out.push(n);
                 }
-                None => out.push_str("\\\\"),
+                _ => return None,
             },
-            c if SWAPPED.contains(c) => {
+            '[' => {
+                out.push('[');
+                if chars.peek() == Some(&'^') {
+                    out.push(chars.next()?);
+                }
+                if chars.peek() == Some(&']') {
+                    out.push_str("\\]");
+                    chars.next();
+                }
+                loop {
+                    match chars.next()? {
+                        ']' => break,
+                        '\\' => return None,
+                        '[' if chars.peek() == Some(&':') => {
+                            out.push('[');
+                            for k in chars.by_ref() {
+                                out.push(k);
+                                if k == ']' {
+                                    break;
+                                }
+                            }
+                        }
+                        '[' => return None,
+                        k @ ('&' | '-' | '~') if chars.peek() == Some(&k) => return None,
+                        k => out.push(k),
+                    }
+                }
+                out.push(']');
+            }
+            '(' if !basic && chars.peek() == Some(&'?') => return None,
+            c if SWAPPED.contains(c) && basic => {
                 out.push('\\');
                 out.push(c);
             }
             c => out.push(c),
         }
     }
-    out
+    Some(out)
 }
 
 /// Finds the match a clipped line is centred on, reading each pattern (and each line of a
 /// multi-line one, which both engines take as separate patterns) in the engine's dialect. A
-/// pattern Rust's regex does not accept (PCRE lookaround) is located as a literal; case is
-/// ignored either way, since this only places the window.
+/// pattern the locator cannot read as the engine does is not located at all, so its line
+/// stays whole: its literal spelling is no match.
 fn match_locator(patterns: &[String], dialect: PatternDialect, ignore_case: bool) -> Option<Regex> {
     let pieces: Vec<&str> = patterns
         .iter()
         .flat_map(|p| p.split('\n'))
         .filter(|p| !p.is_empty())
         .collect();
-    let build = |each: &dyn Fn(&str) -> String| {
-        let alternation: Vec<String> = pieces.iter().map(|p| format!("(?:{})", each(p))).collect();
-        regex::RegexBuilder::new(&alternation.join("|"))
-            .case_insensitive(ignore_case)
-            .build()
-            .ok()
-    };
     if pieces.is_empty() {
         return None;
     }
-    // A pattern Rust's regex rejects is not located at all: its literal spelling is no match.
-    match dialect {
-        PatternDialect::Fixed => build(&|p| regex::escape(p)),
-        PatternDialect::Basic => build(&bre_to_regex),
-        PatternDialect::Regex => build(&|p| p.to_string()),
-        PatternDialect::Pcre => None,
-    }
+    let translated = pieces
+        .iter()
+        .map(|p| match dialect {
+            PatternDialect::Fixed => Some(regex::escape(p)),
+            PatternDialect::Basic => posix_to_regex(p, true),
+            PatternDialect::Extended => posix_to_regex(p, false),
+            PatternDialect::Regex => Some(p.to_string()),
+            PatternDialect::Pcre => None,
+        })
+        .map(|p| p.map(|p| format!("(?:{p})")))
+        .collect::<Option<Vec<String>>>()?;
+    regex::RegexBuilder::new(&translated.join("|"))
+        .case_insensitive(ignore_case)
+        .build()
+        .ok()
 }
 
 /// The locator for this search, or none where its matches could differ from the engine's:
-/// PCRE, and `-w`, whose word boundaries the locator does not model.
+/// PCRE, and `-w` and `-x`, whose word and line boundaries the locator does not model.
 fn locator_for<T: AsRef<str>>(engine: Engine, args: &[T], patterns: &[String]) -> Option<Regex> {
     let tokens = tokenize_search_args(args, engine);
-    let whole_words = arg_tokenizer::before_dashdash(&tokens).iter().any(|t| {
-        (t.kind == TokenKind::Short && t.text == "w")
-            || (t.kind == TokenKind::Long && t.text == "word-regexp")
+    let anchored = arg_tokenizer::before_dashdash(&tokens).iter().any(|t| {
+        (t.kind == TokenKind::Short && matches!(t.text, "w" | "x"))
+            || (t.kind == TokenKind::Long && matches!(t.text, "word-regexp" | "line-regexp"))
     });
-    if whole_words {
+    if anchored {
         return None;
     }
     match_locator(
@@ -1466,16 +1516,23 @@ mod tests {
         let re = locator(".*needle").unwrap();
         // The match spans 247 chars, more than the window: the line stays whole.
         assert_eq!(clean_line(&line, 160, None, Some(&re)), line);
-        let re = locator("f{100}needle").unwrap();
+        // A 147-char match fits: the window ends on it rather than a third of a window past.
+        let re = locator("f{140} needle").unwrap();
         let clipped = clean_line(&line, 160, None, Some(&re));
-        assert!(clipped.contains("needle"), "{clipped}");
+        assert_ne!(clipped, line);
+        assert!(
+            clipped.contains(&format!("{} needle", "f".repeat(140))),
+            "{clipped}"
+        );
     }
 
     #[test]
-    fn test_locator_for_skips_whole_word_searches() {
+    fn test_locator_for_skips_whole_word_and_whole_line_searches() {
         let patterns = ["needle".to_string()];
         assert!(locator_for(Engine::Grep, &["-w", "needle"], &patterns).is_none());
         assert!(locator_for(Engine::Rg, &["--word-regexp", "needle"], &patterns).is_none());
+        assert!(locator_for(Engine::Grep, &["-Fx", "needle"], &patterns).is_none());
+        assert!(locator_for(Engine::Rg, &["--line-regexp", "needle"], &patterns).is_none());
         assert!(locator_for(Engine::Rg, &["needle"], &patterns).is_some());
     }
 
@@ -1487,7 +1544,7 @@ mod tests {
         assert_eq!(grep(&["x", "f"]), Basic);
         assert_eq!(grep(&["-rnF", "x"]), Fixed);
         assert_eq!(grep(&["--fixed-strings", "x"]), Fixed);
-        assert_eq!(grep(&["-F", "-E", "x"]), Regex);
+        assert_eq!(grep(&["-F", "-E", "x"]), Extended);
         assert_eq!(grep(&["-P", "-G", "x"]), Basic);
         assert_eq!(grep(&["--", "-F"]), Basic);
         assert_eq!(grep(&["-e", "-F", "f"]), Basic);
@@ -1502,6 +1559,11 @@ mod tests {
         assert_eq!(rg(&["-P", "--no-pcre2", "x"]), Regex);
         assert_eq!(rg(&["--engine", "auto", "x"]), Pcre);
         assert_eq!(rg(&["--engine=default", "x"]), Regex);
+        // The engine flags leave rg's -F alone, and -F overrides any engine.
+        assert_eq!(rg(&["-F", "--no-pcre2", "x"]), Fixed);
+        assert_eq!(rg(&["-F", "--engine=default", "x"]), Fixed);
+        assert_eq!(rg(&["-F", "-P", "x"]), Fixed);
+        assert_eq!(rg(&["-P", "-F", "--no-fixed-strings", "x"]), Pcre);
     }
 
     #[test]
@@ -1528,10 +1590,24 @@ mod tests {
     }
 
     #[test]
-    fn test_bre_to_regex_swaps_escaped_and_bare_operators() {
-        assert_eq!(bre_to_regex(r"a\+b"), "a+b");
-        assert_eq!(bre_to_regex(r"f(x)\|g\{2\}"), r"f\(x\)|g{2}");
-        assert_eq!(bre_to_regex(r"\.\*\<w\>"), r"\.\*\<w\>");
+    fn test_posix_to_regex_swaps_bre_operators_and_refuses_what_differs() {
+        let bre = |p| posix_to_regex(p, true);
+        let ere = |p| posix_to_regex(p, false);
+        assert_eq!(bre(r"a\+b").as_deref(), Some("a+b"));
+        assert_eq!(bre(r"f(x)\|g\{2\}").as_deref(), Some(r"f\(x\)|g{2}"));
+        assert_eq!(bre(r"\.\*\<w\>\s").as_deref(), Some(r"\.\*\<w\>\s"));
+        assert_eq!(ere(r"a+\+(b|c)").as_deref(), Some(r"a+\+(b|c)"));
+        assert_eq!(bre("[]a-c[:digit:]]").as_deref(), Some(r"[\]a-c[:digit:]]"));
+        assert_eq!(bre("[^]x]").as_deref(), Some(r"[^\]x]"));
+        // Rust reads these differently from GNU grep.
+        for p in [
+            r"\d", r"\x41", r"\(a\)\1", r"\`a", r"a\'", r"[\n]", "[a&&b]", "[[=a=]]",
+        ] {
+            assert_eq!(bre(p), None, "{p}");
+        }
+        assert_eq!(ere("(?i)a"), None);
+        assert_eq!(bre("a\\"), None);
+        assert_eq!(bre("[ab"), None);
     }
 
     #[test]
@@ -1555,6 +1631,12 @@ mod tests {
         );
         assert_eq!(
             at(&["zz\na.b"], PatternDialect::Fixed).as_deref(),
+            Some("a.b")
+        );
+        // One pattern the locator cannot read leaves the whole search unlocated.
+        assert_eq!(at(&["a.b", r"\d"], PatternDialect::Basic), None);
+        assert_eq!(
+            at(&[r"a\.b"], PatternDialect::Extended).as_deref(),
             Some("a.b")
         );
     }

@@ -201,6 +201,31 @@ fn a_whole_word_clip_keeps_the_standalone_word() {
 }
 
 #[test]
+fn an_rg_fixed_string_clip_survives_engine_flags() {
+    // --no-pcre2 and --engine pick the regex engine; neither turns -F off.
+    let line = |i| format!("aXb {} a.b {} {i}", "f".repeat(240), "g".repeat(240));
+    assert_every_clip_keeps(&["rg", "-F", "--no-pcre2", "a.b"], line, "a.b");
+    assert_every_clip_keeps(&["rg", "-F", "--engine=default", "a.b"], line, "a.b");
+}
+
+#[test]
+fn a_gnu_only_bre_escape_keeps_its_match() {
+    // GNU grep reads \` as the start of the line; Rust's regex as a literal backtick.
+    let line = |i| format!("foo {} `foo {} {i}", "f".repeat(240), "g".repeat(240));
+    assert_every_clip_keeps(&["grep", r"\`foo"], line, "foo fff");
+}
+
+#[test]
+fn a_whole_line_match_keeps_the_line() {
+    // `foo` alone is no -x match; the line matches only as a whole.
+    let long = format!("foo {} {}", "f".repeat(240), "g".repeat(240));
+    let line = |_| long.clone();
+    for engine in ["grep", "rg"] {
+        assert_every_clip_keeps(&[engine, "-Fx", "-e", "foo", "-e", &long], line, &long);
+    }
+}
+
+#[test]
 fn a_match_longer_than_the_window_keeps_its_end() {
     let line = |i| format!("{} needle {} {i}", "f".repeat(240), "g".repeat(240));
     assert_every_clip_keeps(&["rg", ".*needle"], line, "needle");
