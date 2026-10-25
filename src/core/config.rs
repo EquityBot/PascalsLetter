@@ -228,6 +228,9 @@ pub struct LimitsConfig {
     pub grep_max_per_file: usize,
     /// Max chars kept of each line once grep output is capped (default: 160)
     pub grep_max_line_len: usize,
+    /// Largest `git diff` shown whole; only a bigger one is compacted (default: 30000, the
+    /// Claude Code Bash tool's own output cap)
+    pub diff_full_max_chars: usize,
     /// Max staged/modified files shown in git status (default: 15)
     pub status_max_files: usize,
     /// Max untracked files shown in git status (default: 10)
@@ -242,6 +245,7 @@ impl Default for LimitsConfig {
             grep_max_results: 200,
             grep_max_per_file: 25,
             grep_max_line_len: 160,
+            diff_full_max_chars: 30_000,
             status_max_files: 15,
             status_max_untracked: 10,
             passthrough_max_chars: 2000,

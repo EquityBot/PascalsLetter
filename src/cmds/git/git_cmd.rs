@@ -2,6 +2,7 @@
 
 use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec, is_digit_run};
 use crate::core::args_utils;
+use crate::core::config;
 use crate::core::guard::never_worse;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::{display_args, quote_word, with_args};
@@ -413,6 +414,20 @@ fn run_diff(
             &diff_result.stdout,
         );
         return Ok(diff_result.exit_code);
+    }
+
+    // Below the agent's own output cap the diff is shown whole. Compaction there saved a few
+    // kilobytes by dropping up to nine lines in ten of a new file, which the agent then re-ran
+    // raw to get back; only a diff the agent's shell would cut anyway is worth compacting.
+    if max_lines.is_none() && diff_result.stdout.len() <= config::limits().diff_full_max_chars {
+        print!("{}", diff_result.stdout);
+        timer.track(
+            &tracked,
+            &tracking::passthrough_label(&tracked),
+            &diff_result.stdout,
+            &diff_result.stdout,
+        );
+        return Ok(0);
     }
 
     // `--no-patch --stat` forces the header to be stat-only whatever the user asked for --

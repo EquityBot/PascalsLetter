@@ -263,13 +263,52 @@ fn git_diff_dash_dash_stat_pathspec_after_double_dash_is_not_stat_flag() {
     let (stdout, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "diff", "--", "--stat"]);
 
     assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    // A diff this small is shown whole; the `--stat` flag would print the diffstat alone.
     assert!(
-        !stdout.contains("diff --git"),
-        "-- --stat should stay on RTK's stat+compacted-diff path, not raw passthrough: {stdout:?}"
+        stdout.contains("+line two") && !stdout.contains("1 file changed"),
+        "-- --stat should show the file's diff, not take the diffstat-only path: {stdout:?}"
+    );
+}
+
+#[test]
+fn git_diff_is_shown_whole_below_the_full_diff_budget() {
+    // A new file of 300 lines used to come back as its first 100, behind a stat header.
+    let dir = init_git_repo();
+    let body: String = (0..300).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(dir.path().join("new.txt"), &body).expect("write file");
+    git_in_dir(dir.path(), &["add", "-N", "new.txt"]);
+
+    let (stdout, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "diff"]);
+    let raw =
+        String::from_utf8_lossy(&git(dir.path()).arg("diff").output().unwrap().stdout).into_owned();
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert_eq!(
+        stdout, raw,
+        "a diff under the budget must be git's own output"
+    );
+}
+
+#[test]
+fn git_diff_over_the_full_diff_budget_is_still_compacted() {
+    let dir = init_git_repo();
+    let body: String = (0..3000)
+        .map(|i| format!("line {i} {}\n", "x".repeat(20)))
+        .collect();
+    std::fs::write(dir.path().join("big.txt"), &body).expect("write file");
+    git_in_dir(dir.path(), &["add", "-N", "big.txt"]);
+
+    let (stdout, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "diff"]);
+
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    assert!(
+        stdout.contains("Changes:"),
+        "expected the compacted form: {stdout:.300}"
     );
     assert!(
-        stdout.contains("--stat | 1 +") && stdout.contains("Changes:"),
-        "expected RTK's stat-summary-plus-compacted-diff output for the modified --stat file: {stdout:?}"
+        stdout.len() < body.len() / 2,
+        "not compacted: {} bytes",
+        stdout.len()
     );
 }
 
