@@ -500,6 +500,9 @@ fn perms_to_octal(perms: &str) -> Option<String> {
 /// (noise dirs without -a/-A as `name/`, plus raw unparsable non-dotdir
 /// lines).
 /// If parsed_count == 0 but raw had content, caller should fall back to raw output.
+/// Largest compact listing shown whole, past [`CAP_INVENTORY`] entries (about 1,000 tokens).
+const LS_FULL_MAX_CHARS: usize = 4_000;
+
 fn compact_ls(
     raw: &str,
     show_all: bool,
@@ -580,8 +583,10 @@ fn compact_ls(
         });
     }
 
-    // Cap the displayed listing; the rest is recoverable via the tee hint.
-    let truncated = if all_lines.len() > CAP_INVENTORY {
+    // Cap the displayed listing; the rest is recoverable via the tee hint. A listing short
+    // enough to read in one go is shown whole: a recall round trip would cost more.
+    let listing_chars: usize = all_lines.iter().map(|l| l.chars().count() + 1).sum();
+    let truncated = if all_lines.len() > CAP_INVENTORY && listing_chars > LS_FULL_MAX_CHARS {
         all_lines.split_off(CAP_INVENTORY)
     } else {
         Vec::new()
@@ -951,19 +956,34 @@ mod tests {
         let mut input = String::from("total 0\n");
         for i in 0..60 {
             input.push_str(&format!(
-                "-rw-r--r--  1 user  staff  100 Jan  1 12:00 file{:02}.txt\n",
-                i
+                "-rw-r--r--  1 user  staff  100 Jan  1 12:00 file{:02}{}.txt\n",
+                i,
+                "-long-name".repeat(8)
             ));
         }
         let (entries, _parsed, truncated, _hidden) = compact_ls(&input, false, false);
         assert_eq!(entries.lines().count(), CAP_INVENTORY);
         assert_eq!(truncated.len(), 60 - CAP_INVENTORY);
-        assert!(entries.contains("file00.txt"));
-        assert!(!entries.contains("file59.txt"));
+        assert!(entries.contains("file00-long"));
+        assert!(!entries.contains("file59-long"));
         assert!(
-            truncated.iter().any(|l| l.contains("file59.txt")),
+            truncated.iter().any(|l| l.contains("file59-long")),
             "overflow entries must be recoverable via the tee file"
         );
+    }
+
+    #[test]
+    fn test_compact_shows_a_short_listing_whole_past_the_entry_cap() {
+        let mut input = String::from("total 0\n");
+        for i in 0..99 {
+            input.push_str(&format!(
+                "-rw-r--r--  1 user  staff  100 Jan  1 12:00 file{:02}.txt\n",
+                i
+            ));
+        }
+        let (entries, _parsed, truncated, _hidden) = compact_ls(&input, false, false);
+        assert!(truncated.is_empty());
+        assert_eq!(entries.lines().count(), 99);
     }
 
     #[test]
