@@ -106,3 +106,26 @@ fn a_response_past_the_capture_limit_passes_through_unchanged() {
     big.extend(br#""}"#);
     assert_verbatim(&big, 0);
 }
+
+#[test]
+fn links_stay_when_the_response_cannot_be_stored() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    fake_gh(dir.path(), LINKED, 0);
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let path = format!(
+        "{}{sep}{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let out = common::rtk_command()
+        .args(["gh", "api", "repos/o/r"])
+        .env("PATH", path)
+        .env("RTK_RECALL", "0")
+        .output()
+        .expect("run rtk");
+
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(out.stdout, LINKED, "filtered without a stored original");
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("dropped"));
+}

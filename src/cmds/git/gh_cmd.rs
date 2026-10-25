@@ -1150,15 +1150,17 @@ fn run_api(args: &[String], _verbose: u8) -> Result<i32> {
         .stdin(Stdio::inherit())
         .stderr(Stdio::inherit());
     let output = cmd.output().context("Failed to run gh api")?;
+    // Filtered only once the whole response is stored: without recovery, links stay.
     let filtered = std::str::from_utf8(&output.stdout)
         .ok()
         .filter(|_| output.status.success())
-        .and_then(|raw| Some((raw, drop_api_links(raw)?)));
+        .and_then(|raw| {
+            let (compact, dropped) = drop_api_links(raw)?;
+            Some((raw, compact, dropped, tee::force_tee_hint(raw, "gh-api")?))
+        });
     let mut stdout = std::io::stdout().lock();
     match filtered {
-        Some((raw, (compact, dropped))) => {
-            let hint = tee::force_tee_hint(raw, "gh-api")
-                .unwrap_or_else(|| "`rtk bypass gh api ...` for all".to_string());
+        Some((raw, compact, dropped, hint)) => {
             writeln!(stdout, "{compact}")?;
             stdout.flush()?;
             eprintln!("[rtk] dropped {dropped} {GITHUB_API} *_url links; {hint}");
