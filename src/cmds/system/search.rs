@@ -805,7 +805,7 @@ pub fn run(
         None
     };
 
-    let locate = match_locator(&pattern_display);
+    let locate = match_locator(&patterns, pattern_dialect(engine, args));
     let mut by_file: HashMap<String, Vec<(usize, bool, String)>> = HashMap::new();
     for line in raw_output.lines() {
         let Some((file, line_num, is_match, content)) = parse_match_line(line) else {
@@ -935,8 +935,14 @@ pub fn run(
     };
 
     // Capping hides matches and clips lines, which the agent pays back with a re-run, so the
-    // grouped form must buy a real saving: at least a third of the faithful output.
-    let output = if capped && rtk_output.len() * 3 <= plain.len() * 2 {
+    // grouped form must buy a real saving: at least a third of the faithful output. Unless
+    // only the grouped form fits what the agent sees: the faithful one would lose its tail,
+    // and with it the files and overflow hints the grouped form keeps.
+    let budget = crate::core::config::limits().agent_output_max_chars;
+    let fits = |s: &str| s.chars().count() <= budget;
+    let output = if capped
+        && (rtk_output.len() * 3 <= plain.len() * 2 || (fits(&rtk_output) && !fits(&plain)))
+    {
         rtk_output
     } else {
         plain
@@ -1187,17 +1193,89 @@ fn clean_line(
     }
 }
 
-/// Finds the match a clipped line is centred on. The pattern is in the engine's dialect, so
-/// one that Rust's regex does not accept is located as a literal; case is ignored either way,
-/// since this only places the window.
-fn match_locator(pattern: &str) -> Option<Regex> {
-    let build = |p: &str| {
-        regex::RegexBuilder::new(p)
+/// The language the engine reads its patterns in. The last mode flag wins, as in both engines.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PatternDialect {
+    Fixed,
+    /// grep's default BRE, where `\+ \? \| \( \) \{ \}` are the operators.
+    Basic,
+    /// rg's Rust regex, or grep's ERE and PCRE, close enough to it to place a window.
+    Regex,
+}
+
+fn pattern_dialect<T: AsRef<str>>(engine: Engine, args: &[T]) -> PatternDialect {
+    let tokens = tokenize_search_args(args, engine);
+    let mut dialect = match engine {
+        Engine::Grep => PatternDialect::Basic,
+        Engine::Rg => PatternDialect::Regex,
+    };
+    for t in arg_tokenizer::before_dashdash(&tokens) {
+        dialect = match (engine, t.kind, t.text) {
+            (_, TokenKind::Short, "F") | (_, TokenKind::Long, "fixed-strings") => {
+                PatternDialect::Fixed
+            }
+            (Engine::Grep, TokenKind::Short, "G")
+            | (Engine::Grep, TokenKind::Long, "basic-regexp") => PatternDialect::Basic,
+            (Engine::Grep, TokenKind::Short, "E" | "P")
+            | (Engine::Grep, TokenKind::Long, "extended-regexp" | "perl-regexp")
+            | (Engine::Rg, TokenKind::Long, "no-fixed-strings") => PatternDialect::Regex,
+            _ => dialect,
+        };
+    }
+    dialect
+}
+
+/// A BRE as the equivalent Rust regex: the escaped and bare forms of `+ ? | ( ) { }` swap.
+fn bre_to_regex(pattern: &str) -> String {
+    const SWAPPED: &str = "+?|(){}";
+    let mut out = String::with_capacity(pattern.len() + 8);
+    let mut chars = pattern.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some(n) if SWAPPED.contains(n) => out.push(n),
+                Some(n) => {
+                    out.push('\\');
+                    out.push(n);
+                }
+                None => out.push_str("\\\\"),
+            },
+            c if SWAPPED.contains(c) => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Finds the match a clipped line is centred on, reading each pattern (and each line of a
+/// multi-line one, which both engines take as separate patterns) in the engine's dialect. A
+/// pattern Rust's regex does not accept (PCRE lookaround) is located as a literal; case is
+/// ignored either way, since this only places the window.
+fn match_locator(patterns: &[String], dialect: PatternDialect) -> Option<Regex> {
+    let pieces: Vec<&str> = patterns
+        .iter()
+        .flat_map(|p| p.split('\n'))
+        .filter(|p| !p.is_empty())
+        .collect();
+    let build = |each: &dyn Fn(&str) -> String| {
+        let alternation: Vec<String> = pieces.iter().map(|p| format!("(?:{})", each(p))).collect();
+        regex::RegexBuilder::new(&alternation.join("|"))
             .case_insensitive(true)
             .build()
             .ok()
     };
-    build(pattern).or_else(|| build(&regex::escape(pattern)))
+    if pieces.is_empty() {
+        return None;
+    }
+    match dialect {
+        PatternDialect::Fixed => None,
+        PatternDialect::Basic => build(&bre_to_regex),
+        PatternDialect::Regex => build(&|p| p.to_string()),
+    }
+    .or_else(|| build(&|p| regex::escape(p)))
 }
 
 fn compact_path(path: &str) -> String {
@@ -1222,10 +1300,14 @@ fn compact_path(path: &str) -> String {
 mod tests {
     use super::*;
 
+    fn locator(pattern: &str) -> Option<Regex> {
+        match_locator(&[pattern.to_string()], PatternDialect::Regex)
+    }
+
     #[test]
     fn test_clean_line() {
         let line = "            const result = someFunction();";
-        let cleaned = clean_line(line, 50, None, match_locator("result").as_ref());
+        let cleaned = clean_line(line, 50, None, locator("result").as_ref());
         assert!(!cleaned.starts_with(' '));
         assert!(cleaned.len() <= 50);
     }
@@ -1286,7 +1368,7 @@ mod tests {
     fn test_clean_line_multibyte() {
         // Thai text that exceeds max_len in bytes
         let line = "  สวัสดีครับ นี่คือข้อความที่ยาวมากสำหรับทดสอบ  ";
-        let cleaned = clean_line(line, 20, None, match_locator("ครับ").as_ref());
+        let cleaned = clean_line(line, 20, None, locator("ครับ").as_ref());
         // Should not panic
         assert!(!cleaned.is_empty());
     }
@@ -1296,7 +1378,7 @@ mod tests {
         // A literal search for `fn\s+run` finds nothing, so the old window kept the head of
         // the line and cut the match away.
         let line = format!("{} fn   run() {{}}", "x".repeat(200));
-        let cleaned = clean_line(&line, 40, None, match_locator(r"fn\s+run").as_ref());
+        let cleaned = clean_line(&line, 40, None, locator(r"fn\s+run").as_ref());
         assert!(cleaned.contains("fn   run()"), "{cleaned}");
         assert!(cleaned.starts_with("..."), "{cleaned}");
     }
@@ -1305,21 +1387,71 @@ mod tests {
     fn test_clean_line_survives_lowercase_that_changes_length() {
         // 'İ' lowercases to two chars; offsets taken on the lowercased copy overshot the line.
         let line = format!("{}needle{}", "İ".repeat(60), "y".repeat(60));
-        let cleaned = clean_line(&line, 20, None, match_locator("needle").as_ref());
+        let cleaned = clean_line(&line, 20, None, locator("needle").as_ref());
         assert!(cleaned.contains("needle"), "{cleaned}");
     }
 
     #[test]
     fn test_match_locator_falls_back_to_a_literal() {
         // In grep's BRE `(` is a literal; Rust's regex rejects it unclosed.
-        let re = match_locator("a(b").expect("literal fallback");
+        let re = locator("a(b").expect("literal fallback");
         assert!(re.is_match("xa(by"));
+    }
+
+    #[test]
+    fn test_pattern_dialect_follows_the_last_mode_flag() {
+        use PatternDialect::*;
+        let grep = |args: &[&str]| pattern_dialect(Engine::Grep, args);
+        let rg = |args: &[&str]| pattern_dialect(Engine::Rg, args);
+        assert_eq!(grep(&["x", "f"]), Basic);
+        assert_eq!(grep(&["-rnF", "x"]), Fixed);
+        assert_eq!(grep(&["--fixed-strings", "x"]), Fixed);
+        assert_eq!(grep(&["-F", "-E", "x"]), Regex);
+        assert_eq!(grep(&["-P", "-G", "x"]), Basic);
+        assert_eq!(grep(&["--", "-F"]), Basic);
+        assert_eq!(rg(&["x"]), Regex);
+        assert_eq!(rg(&["-F", "x"]), Fixed);
+        assert_eq!(rg(&["-F", "--no-fixed-strings", "x"]), Regex);
+        // rg's -E is --encoding, not a pattern mode.
+        assert_eq!(rg(&["-F", "-E", "utf8", "x"]), Fixed);
+    }
+
+    #[test]
+    fn test_bre_to_regex_swaps_escaped_and_bare_operators() {
+        assert_eq!(bre_to_regex(r"a\+b"), "a+b");
+        assert_eq!(bre_to_regex(r"f(x)\|g\{2\}"), r"f\(x\)|g{2}");
+        assert_eq!(bre_to_regex(r"\.\*\<w\>"), r"\.\*\<w\>");
+    }
+
+    #[test]
+    fn test_match_locator_reads_each_dialect() {
+        let line = format!("aXb {} a.b aab {}", "f".repeat(60), "g".repeat(60));
+        let at = |patterns: &[&str], d| {
+            let patterns: Vec<String> = patterns.iter().map(|p| p.to_string()).collect();
+            match_locator(&patterns, d)
+                .and_then(|re| re.find(&line))
+                .map(|m| m.as_str().to_string())
+        };
+        assert_eq!(at(&["a.b"], PatternDialect::Fixed).as_deref(), Some("a.b"));
+        assert_eq!(at(&["a.b"], PatternDialect::Regex).as_deref(), Some("aXb"));
+        assert_eq!(
+            at(&[r"a\+b"], PatternDialect::Basic).as_deref(),
+            Some("aab")
+        );
+        assert_eq!(
+            at(&["zz", "a.b"], PatternDialect::Fixed).as_deref(),
+            Some("a.b")
+        );
+        assert_eq!(
+            at(&["zz\na.b"], PatternDialect::Fixed).as_deref(),
+            Some("a.b")
+        );
     }
 
     #[test]
     fn test_clean_line_emoji() {
         let line = "🎉🎊🎈🎁🎂🎄 some text 🎃🎆🎇✨";
-        let cleaned = clean_line(line, 15, None, match_locator("text").as_ref());
+        let cleaned = clean_line(line, 15, None, locator("text").as_ref());
         assert!(!cleaned.is_empty());
     }
 

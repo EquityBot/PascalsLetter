@@ -419,7 +419,9 @@ fn run_diff(
     // Below the agent's own output cap the diff is shown whole. Compaction there saved a few
     // kilobytes by dropping up to nine lines in ten of a new file, which the agent then re-ran
     // raw to get back; only a diff the agent's shell would cut anyway is worth compacting.
-    if max_lines.is_none() && diff_result.stdout.len() <= config::limits().diff_full_max_chars {
+    if max_lines.is_none()
+        && diff_result.stdout.chars().count() <= config::limits().agent_output_max_chars
+    {
         print!("{}", diff_result.stdout);
         timer.track(
             &tracked,
