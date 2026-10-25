@@ -53,7 +53,7 @@ fn links_are_dropped_and_the_whole_response_is_recallable() {
     let dir = tempfile::tempdir().expect("tempdir");
     fake_gh(dir.path(), LINKED, 0);
 
-    let out = rtk_with(dir.path(), &["gh", "api", "repos/o/r"]);
+    let out = rtk_with(dir.path(), &["gh", "api", "repos/los-pollos/hermanos"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
@@ -76,7 +76,7 @@ fn assert_verbatim(payload: &[u8], code: i32) {
     let dir = tempfile::tempdir().expect("tempdir");
     fake_gh(dir.path(), payload, code);
 
-    let out = rtk_with(dir.path(), &["gh", "api", "repos/o/r"]);
+    let out = rtk_with(dir.path(), &["gh", "api", "repos/los-pollos/hermanos"]);
 
     assert_eq!(out.status.code(), Some(code));
     assert!(
@@ -119,7 +119,7 @@ fn links_stay_when_the_response_cannot_be_stored() {
     );
 
     let out = common::rtk_command()
-        .args(["gh", "api", "repos/o/r"])
+        .args(["gh", "api", "repos/los-pollos/hermanos"])
         .env("PATH", path)
         .env("RTK_RECALL", "0")
         .output()
