@@ -452,7 +452,7 @@ fn run_diff(
         let plain = strip_ansi(&diff_result.stdout);
         let compacted = with_full_diff_hint(
             compact_diff(&plain, max_lines.unwrap_or(500)),
-            &plain,
+            &diff_result.stdout,
             "git-diff",
         );
         format!("{}\n\nChanges:\n{}", result.stdout.trim(), compacted)
@@ -793,7 +793,7 @@ fn run_show(
         let plain = strip_ansi(diff_text);
         let compacted = with_full_diff_hint(
             compact_diff(&plain, max_lines.unwrap_or(500)),
-            &plain,
+            &raw_output,
             "git-show",
         );
         printed.push('\n');

@@ -713,3 +713,43 @@ fn git_show_blob_spec_after_double_dash_is_a_pathspec_not_an_object() {
         "pathspec past -- must not be windowed as a blob: {stdout:?}"
     );
 }
+
+#[test]
+fn a_truncated_git_show_recalls_the_whole_commit() {
+    let dir = init_git_repo();
+    let body: String = (0..3000)
+        .map(|i| format!("line {i} {}\n", "x".repeat(20)))
+        .collect();
+    std::fs::write(dir.path().join("big.txt"), &body).expect("write file");
+    git_in_dir(dir.path(), &["add", "big.txt"]);
+    git_in_dir(
+        dir.path(),
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "distinctive subject",
+            "-m",
+            "second paragraph",
+        ],
+    );
+
+    let (stdout, stderr, code) = rtk_output_in_dir(dir.path(), &["git", "show"]);
+    assert_eq!(code, Some(0), "rtk stderr: {stderr}");
+    let hash = stdout
+        .split("[full output: rtk recall ")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .unwrap_or_else(|| panic!("no recall hint: {stdout:.500}"));
+
+    let (full, stderr, code) = rtk_output_in_dir(dir.path(), &["recall", hash, "--full"]);
+    assert_eq!(code, Some(0), "rtk recall stderr: {stderr}");
+    for wanted in [
+        "distinctive subject",
+        "second paragraph",
+        "Author:",
+        "+line 2999 ",
+    ] {
+        assert!(full.contains(wanted), "recall lacks {wanted:?}");
+    }
+}
