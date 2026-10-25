@@ -8,7 +8,7 @@ use crate::core::args_utils;
 use crate::core::runner::{self, RunOptions};
 use crate::core::shell::quote_word;
 use crate::core::truncate::CAP_LIST;
-use crate::core::utils::{ok_confirmation, resolved_command, truncate};
+use crate::core::utils::{ChildArgExt, ok_confirmation, resolved_command, truncate};
 use crate::git_cmd;
 use anyhow::Result;
 use regex::Regex;
@@ -1130,9 +1130,70 @@ fn pr_action(
 
 fn run_api(args: &[String], _verbose: u8) -> Result<i32> {
     // gh api is an explicit/advanced command — the user knows what they asked for.
-    // Converting JSON to a schema destroys all values and forces Claude to re-fetch.
-    // Passthrough preserves the full response and tracks metrics at 0% savings.
-    run_passthrough("gh", "api", args)
+    // Converting JSON to a schema destroys all values and forces Claude to re-fetch, so every
+    // value stays. What goes is GitHub's hypermedia: `*_url` templates pointing back into
+    // api.github.com, derivable from the object's own `url`, and up to 70% of a repository,
+    // pull request or workflow-run object. A `--jq`/`--template` result is what the user
+    // selected, so it passes through untouched.
+    if args.iter().any(|a| is_api_selection_flag(a)) {
+        return run_passthrough("gh", "api", args);
+    }
+    let mut cmd = resolved_command("gh");
+    cmd.arg("api").child_args(args);
+    runner::run_filtered(
+        cmd,
+        "gh",
+        &format!("api {}", args.join(" ")),
+        drop_api_links,
+        RunOptions::stdout_only()
+            .inherit_stdin()
+            .early_exit_on_failure(),
+    )
+}
+
+fn is_api_selection_flag(arg: &str) -> bool {
+    matches!(arg, "-q" | "--jq" | "-t" | "--template")
+        || arg.starts_with("--jq=")
+        || arg.starts_with("--template=")
+}
+
+const GITHUB_API: &str = "https://api.github.com/";
+
+/// The response without its api.github.com `*_url` links, with a one-line note on stderr of
+/// how many went. Anything that is not a single JSON document (`--include` headers,
+/// `--paginate` pages) is returned as it came.
+fn drop_api_links(stdout: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(stdout) else {
+        return stdout.to_string();
+    };
+    let dropped = strip_api_links(&mut value);
+    if dropped == 0 {
+        return stdout.to_string();
+    }
+    match serde_json::to_string(&value) {
+        Ok(compact) => {
+            eprintln!(
+                "[rtk] dropped {dropped} {GITHUB_API} *_url links; `rtk bypass gh api ...` for all"
+            );
+            compact
+        }
+        Err(_) => stdout.to_string(),
+    }
+}
+
+fn strip_api_links(value: &mut Value) -> usize {
+    match value {
+        Value::Object(map) => {
+            let before = map.len();
+            map.retain(|key, v| {
+                !(key.ends_with("_url") && v.as_str().is_some_and(|s| s.starts_with(GITHUB_API)))
+            });
+            let here = before - map.len();
+            here + map.values_mut().map(strip_api_links).sum::<usize>()
+        }
+        Value::Array(items) => items.iter_mut().map(strip_api_links).sum(),
+        _ => 0,
+    }
 }
 
 // Edge case: error context is now "Failed to run {cmd}" (loses subcommand detail)
@@ -1152,6 +1213,53 @@ fn run_passthrough(cmd: &str, subcommand: &str, args: &[String]) -> Result<i32> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_drop_api_links_keeps_every_value_but_api_hypermedia() {
+        let raw = r#"{"id":1,"url":"https://api.github.com/repos/o/r","html_url":"https://github.com/o/r","forks_url":"https://api.github.com/repos/o/r/forks","clone_url":"https://github.com/o/r.git","download_url":"https://raw.githubusercontent.com/o/r/x","owner":{"login":"o","repos_url":"https://api.github.com/users/o/repos"},"items":[{"events_url":"https://api.github.com/x{/y}","note":"<b>"}],"homepage_url":null}"#;
+        let out = drop_api_links(raw);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "id": 1,
+                "url": "https://api.github.com/repos/o/r",
+                "html_url": "https://github.com/o/r",
+                "clone_url": "https://github.com/o/r.git",
+                "download_url": "https://raw.githubusercontent.com/o/r/x",
+                "owner": {"login": "o"},
+                "items": [{"note": "<b>"}],
+                "homepage_url": null
+            })
+        );
+        // Key order is kept (serde_json `preserve_order`).
+        assert!(out.starts_with(r#"{"id":1,"url":"#), "{out}");
+    }
+
+    #[test]
+    fn test_drop_api_links_leaves_non_json_and_link_free_output_alone() {
+        let paged = "[{\"a\":1}][{\"b\":2}]";
+        assert_eq!(drop_api_links(paged), paged);
+        let plain = "{\"name\": \"x\"}\n";
+        assert_eq!(drop_api_links(plain), plain);
+    }
+
+    #[test]
+    fn test_api_selection_flags_pass_through() {
+        for flag in [
+            "-q",
+            "--jq",
+            "--jq=.x",
+            "-t",
+            "--template",
+            "--template={{.x}}",
+        ] {
+            assert!(is_api_selection_flag(flag), "{flag}");
+        }
+        for other in ["--paginate", "-i", "repos/o/r", "-f"] {
+            assert!(!is_api_selection_flag(other), "{other}");
+        }
+    }
 
     #[test]
     fn test_truncate() {
