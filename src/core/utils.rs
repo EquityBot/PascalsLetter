@@ -530,6 +530,22 @@ pub fn quote_arg_for_msys(arg: &str) -> String {
     out
 }
 
+/// True when the MSYS runtime would change `arg` on std's encoding: it globs,
+/// brace-expands, expands `~` and `@file`, and treats `\`, `'` and `"` as quoting.
+/// Anything else stays on std's path, so `get_args()` readers such as
+/// [`crate::core::runner::requests_help`] still see a plain `--help` as written.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn msys_would_rewrite(arg: &str) -> bool {
+    arg.is_empty()
+        || arg.chars().any(|c| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '\\' | '"' | '\'' | '*' | '?' | '[' | ']' | '{' | '}' | '~' | '@'
+                )
+        })
+}
+
 /// Pass caller-supplied arguments to a child so that MSYS/Cygwin children on
 /// Windows receive them intact.
 ///
@@ -573,7 +589,7 @@ fn push_child_arg(cmd: &mut Command, arg: &OsStr) {
         _ if is_batch_program(cmd) => {
             cmd.arg(arg);
         }
-        Some(s) if is_msys_program(cmd) => {
+        Some(s) if msys_would_rewrite(s) && is_msys_program(cmd) => {
             cmd.raw_arg(quote_arg_for_msys(s));
         }
         Some(s) if s.contains('"') => {

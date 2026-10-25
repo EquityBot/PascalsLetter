@@ -355,12 +355,14 @@ mod tests {
             "$HOME".to_string(),
         ];
         let command = ready(direct_command(&args).expect("build direct command"));
-        let actual: Vec<_> = command.get_args().collect();
+        // On Windows `echo` is usually MSYS's, whose glob-prone arguments go in as raw
+        // quoted text (see `utils::quote_arg_for_msys`); the boundaries are what count.
+        let actual: Vec<_> = command
+            .get_args()
+            .map(|a| a.to_string_lossy().trim_matches('"').to_string())
+            .collect();
 
-        assert_eq!(
-            actual,
-            [OsStr::new("a b"), OsStr::new("*"), OsStr::new("$HOME")]
-        );
+        assert_eq!(actual, ["a b", "*", "$HOME"]);
     }
 
     #[test]

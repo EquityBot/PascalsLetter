@@ -6,7 +6,7 @@
 use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use crate::core::args_utils;
 use crate::core::runner::{self, RunOptions};
-use crate::core::shell::quote_word;
+use crate::core::shell::{display_args, quote_word, with_args};
 use crate::core::truncate::CAP_LIST;
 use crate::core::utils::{ChildArgExt, ok_confirmation, resolved_command, truncate};
 use crate::git_cmd;
@@ -1143,7 +1143,7 @@ fn run_api(args: &[String], _verbose: u8) -> Result<i32> {
     runner::run_filtered(
         cmd,
         "gh",
-        &format!("api {}", args.join(" ")),
+        &with_args("api", &display_args(args)),
         drop_api_links,
         RunOptions::stdout_only()
             .inherit_stdin()
