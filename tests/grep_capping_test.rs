@@ -139,6 +139,15 @@ fn assert_every_clip_keeps_in(
     line: impl Fn(usize) -> String,
     wanted: &str,
 ) {
+    // CI runners have grep but not always rg; a case for a missing engine has nothing to test.
+    let engine_runs = std::process::Command::new(args[0])
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !engine_runs {
+        eprintln!("skipped: {} is not installed", args[0]);
+        return;
+    }
     let dir = tempfile::tempdir().expect("test setup");
     let body: String = (0..400).map(|i| line(i) + "\n").collect();
     std::fs::write(dir.path().join("long.txt"), body).expect("test setup");
