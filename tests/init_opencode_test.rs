@@ -7,11 +7,36 @@ use std::process::{Command, Stdio};
 
 mod common;
 
+/// `PATH` with an `opencode` stub under `home` ahead of everything else, so
+/// `rtk init` never reads the developer's own OpenCode. With `version` the stub
+/// prints it; without, it fails, which reads as no OpenCode at all.
+fn path_with_opencode(home: &Path, version: Option<&str>) -> std::ffi::OsString {
+    use std::os::unix::fs::PermissionsExt;
+
+    // One directory per answer, so a test's own stub survives `rtk(home)`.
+    let bin = home.join(format!("opencode-{}", version.unwrap_or("none")));
+    std::fs::create_dir_all(&bin).expect("create stub bin");
+    let opencode = bin.join("opencode");
+    let body = match version {
+        Some(v) => format!("#!/bin/sh\necho {v}\n"),
+        None => "#!/bin/sh\nexit 1\n".to_string(),
+    };
+    std::fs::write(&opencode, body).expect("write opencode stub");
+    std::fs::set_permissions(&opencode, std::fs::Permissions::from_mode(0o755))
+        .expect("make opencode stub executable");
+    let mut path = std::ffi::OsString::from(&bin);
+    path.push(":");
+    path.push(std::env::var_os("PATH").unwrap_or_default());
+    path
+}
+
 /// Runs rtk with `home` as its home, and its configuration, data and history
-/// database inside it; its tee spool and recall database stay in scratch.
+/// database inside it; its tee spool and recall database stay in scratch. Its
+/// `opencode` answers nothing unless a test puts another one first.
 fn rtk(home: &Path) -> Command {
     let mut cmd = common::rtk_command();
     cmd.env("HOME", home)
+        .env("PATH", path_with_opencode(home, None))
         .env("RTK_DB_PATH", home.join("rtk.db"))
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local").join("share"))
@@ -41,6 +66,55 @@ fn plugin(home: &Path) -> std::path::PathBuf {
 fn claude_hook_registered(home: &Path) -> bool {
     std::fs::read_to_string(home.join(".claude").join("settings.json"))
         .is_ok_and(|settings| settings.contains("rtk hook claude"))
+}
+
+#[test]
+fn an_old_opencode_gets_no_plugin_and_no_plugin_path_in_any_install_mode() {
+    // Every way `--opencode` reaches the plugin step, run twice so the second
+    // pass takes the "hook already present" branch.
+    let modes: [&[&str]; 4] = [
+        &["-g", "--opencode", "--auto-patch"],
+        &["-g", "--opencode", "--hook-only", "--auto-patch"],
+        &["-g", "--opencode", "--claude-md"],
+        &["-g", "--opencode", "--agent", "cursor"],
+    ];
+    for args in modes {
+        let home = tempfile::tempdir().unwrap();
+        let path = path_with_opencode(home.path(), Some("1.1.4"));
+
+        for run in 1..=2 {
+            let out = rtk(home.path())
+                .env("PATH", &path)
+                .arg("init")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                !plugin(home.path()).exists(),
+                "{args:?} run {run}: no plugin below the floor"
+            );
+            assert!(
+                stdout.contains("OpenCode 1.1.4 is older than"),
+                "{args:?} run {run}: {stdout}"
+            );
+            for claim in [
+                "plugins/rtk.ts",
+                "OpenCode plugin installed",
+                "Restart Claude Code and OpenCode",
+            ] {
+                assert!(
+                    !stdout.contains(claim),
+                    "{args:?} run {run} reports a plugin it did not write ({claim}): {stdout}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -120,9 +194,11 @@ fn opencode_dry_run_names_both_and_writes_nothing() {
         stdout.contains("/opencode/plugins/rtk.ts"),
         "dry-run must name the OpenCode plugin:\n{stdout}"
     );
+    // The `opencode` stub `rtk(home)` puts there is the test's, not rtk's.
     let leftovers: Vec<_> = std::fs::read_dir(home.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name != "opencode-none")
         .collect();
     assert!(leftovers.is_empty(), "dry-run wrote: {leftovers:?}");
 }

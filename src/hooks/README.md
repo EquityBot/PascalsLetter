@@ -72,17 +72,26 @@ All file operations use atomic writes (tempfile + rename) to prevent corruption 
 RTK enforces a permission precedence that matches Claude Code's least-privilege default:
 
 ```
-Deny > Ask > Allow (explicit) > Default (ask)
+Deny > Defer > Ask > Allow (explicit) > Default (ask)
 ```
 
 Rules are loaded from all Claude Code `settings.json` files (project + global, including `.local` variants). Only `Bash(...)` rules are extracted; other scopes (Read, Write) are ignored.
 
 Quoted `sh -c`, `bash -c`, `zsh -c` and `fish -c` scripts add a
 second command-parsing boundary. RTK checks deny rules against both the outer
-wrapper and the parsed inner segments. A wrapper rewrite is never auto-allowed:
-its strongest RTK verdict is `Ask`. Ask-capable hosts prompt, while other
-hosts retain their existing native permission flow. Unsupported or ambiguous
-wrapper syntax is left unchanged for the host to evaluate.
+wrapper and the parsed inner segments, including a wrapper behind a prefix the
+rewrite strips (`env bash -c '…'`, `timeout 5 sh -c '…'`, a configured
+`transparent_prefixes` entry — `registry::shell_wrapper_positions`). A shell
+name that is merely an argument (`grep -rn bash -c src`) is not a wrapper. A
+deny rule matching an inner segment yields `Defer`: RTK neither rewrites nor
+decides, so the host sees the command exactly as typed.
+A wrapper at the start of a segment is never auto-allowed: its strongest RTK
+verdict is `Ask`. A wrapper behind a prefix is only checked for deny rules and
+otherwise keeps the outer command's verdict, as on master. Ask-capable hosts
+prompt, while other hosts retain their existing native permission flow.
+Unsupported or ambiguous wrapper syntax is left unchanged for the host to
+evaluate. Line continuations are joined before the check, as the rewrite joins
+them.
 
 | Verdict | Trigger | rewrite_cmd exit | Hook behavior |
 |---------|---------|-----------------|---------------|
@@ -90,6 +99,9 @@ wrapper syntax is left unchanged for the host to evaluate.
 | Ask | `permissions.ask` rule matched | 3 | Rewrite + let host tool prompt user |
 | Allow | `permissions.allow` rule matched | 0 | Rewrite + auto-allow |
 | Default | No rule matched | 3 | Rewrite + let host tool prompt user |
+| Defer | `permissions.deny` rule matched inside a shell wrapper | 1 | Passthrough — command runs as without RTK |
+
+A deny or ask rule is matched against each segment as written, without the grammar a split leaves (`{`, `!`, `(`), and past each leading assignment or wrapper in turn (`registry::matching_readings`): `env HUSKY=0 git push` is read as `HUSKY=0 git push` and as `git push`, as Claude Code reads it. A reading need not be what the shell runs (`nohup HUSKY=0 git push` makes nohup look for a program named `HUSKY=0`), so it can only make a verdict stricter. Past 32 prefixes the command behind them is unread, and where a deny or ask rule exists the verdict is at least Ask. An allow rule matches the segment as written only, so a wrapper never inherits the allow of the command it runs.
 
 A delegate that shells out to `rtk rewrite` and applies its own exec policy to
 the result can set `RTK_REWRITE_HOST=<agent>` on that subprocess. For an agent
@@ -132,4 +144,4 @@ rewrite`, since it is inherited by every child process. See `decision.rs`'s
 Hook processors in `hook_cmd.rs` must return `Ok(())` on every path — success, no-match, parse error, and unexpected input. Returning `Err` propagates to `main()` and exits non-zero, which blocks the agent's command from executing. This violates the non-blocking guarantee documented in `hooks/README.md`.
 
 ## Adding New Functionality
-To add support for a new AI coding agent: (1) add the hook installation logic to `src/hooks/init/` following the existing agent patterns, (2) if the agent requires a custom hook protocol (like Gemini's `BeforeTool` or Vibe's `pre_tool`), add a processor function in `hook_cmd.rs` and a matching `HookCommands::<Agent>` variant + `AgentTarget::<Agent>` enum entry in `main.rs`, (3) if the agent has installable permission surfaces (denylist / allowlist), wire them into `permissions.rs::check_command_for` via a new `Host::<Agent>` variant, and (4) update `integrity.rs` with the expected hash for the new hook file. Note that `hook_check.rs::maybe_warn()` only checks the Claude Code hook — other agents don't have an outdated-hook warning path. Test by running `rtk init` in a fresh environment and verifying the hook rewrites commands correctly in the target agent.
+To add support for a new AI coding agent: (1) add the hook installation logic to `src/hooks/init/` following the existing agent patterns, (2) if the agent requires a custom hook protocol (like Gemini's `BeforeTool` or Vibe's `pre_tool`), add a processor function in `hook_cmd.rs` and a matching `HookCommands::<Agent>` variant + `AgentTarget::<Agent>` enum entry in `main.rs`, (3) if the agent has installable permission surfaces (denylist / allowlist), wire them into `permissions.rs::check_command_for` via a new `Host::<Agent>` variant, and (4) update `integrity.rs` with the expected hash for the new hook file. Add an `is_configured()` probe to the agent's init module that covers every scope its `rtk init` writes (global and project), make it reachable from `hook_check` (the module is `pub(crate)` in `init/mod.rs`), and list it in `hook_check.rs::AGENT_PROBES`, so that `rtk gain` and the daily reminder stop reporting a missing hook for users of that agent. Only the Claude Code hook has an outdated-hook warning path. Test by running `rtk init` in a fresh environment and verifying the hook rewrites commands correctly in the target agent.

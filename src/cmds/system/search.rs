@@ -7,11 +7,12 @@ use crate::core::arg_tokenizer::{self, Dialect, Token, TokenKind, ValueSpec};
 use crate::core::guard::never_worse;
 use crate::core::shell::{display_args, with_args};
 use crate::core::stream::{
-    self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture, exec_capture_stdin,
+    self, CaptureResult, FilterMode, StdinMode, StreamFilter, exec_capture_stdin,
+    exec_capture_unguarded,
 };
 use crate::core::tracking;
 use crate::core::utils::{ChildArgExt, resolved_command, strip_ansi};
-use crate::core::{args_utils, config};
+use crate::core::{args_utils, config, user_env};
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
@@ -39,10 +40,19 @@ fn stdin_is_readable() -> bool {
         .unwrap_or(false)
 }
 
-/// KNOWN LIMITATION: no portable file-type check here, so Windows keeps the wider
-/// `!is_terminal()` rule -- `rtk rg foo < NUL` still routes to the streaming path and drops
-/// filenames there.
-#[cfg(not(unix))]
+/// Windows: ripgrep's own rule (`grep_cli::is_readable_stdin`), through the same crate -- not
+/// a terminal (std counts an MSYS pty pipe as one), and a disk file or a pipe. `NUL` is a
+/// character device, so the wider `!is_terminal()` sent `rtk rg foo < NUL` down the stdin
+/// path and dropped the filenames of a search that rg actually ran over the cwd.
+#[cfg(windows)]
+fn stdin_is_readable() -> bool {
+    !std::io::stdin().is_terminal()
+        && winapi_util::file::typ(winapi_util::HandleRef::stdin())
+            .map(|t| t.is_disk() || t.is_pipe())
+            .unwrap_or(false)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn stdin_is_readable() -> bool {
     !std::io::stdin().is_terminal()
 }
@@ -711,7 +721,7 @@ pub fn run(
     if asks_for_help {
         let mut cmd = resolved_command(engine.bin());
         cmd.child_args(args);
-        let result = exec_capture(&mut cmd).context("search failed")?;
+        let result = exec_capture_unguarded(&mut cmd).context("search failed")?;
         print!("{}", result.stdout);
         if !result.stderr.is_empty() {
             eprint!("{}", result.stderr);
@@ -795,12 +805,13 @@ pub fn run(
         None
     };
 
+    let locate = locator_for(engine, args, &patterns);
     let mut by_file: HashMap<String, Vec<(usize, bool, String)>> = HashMap::new();
     for line in raw_output.lines() {
         let Some((file, line_num, is_match, content)) = parse_match_line(line) else {
             continue;
         };
-        let cleaned = clean_line(content, max_line_len, context_re.as_ref(), &pattern_display);
+        let cleaned = clean_line(content, max_line_len, context_re.as_ref(), locate.as_ref());
         by_file
             .entry(file)
             .or_default()
@@ -923,7 +934,16 @@ pub fn run(
         body
     };
 
-    let output = if capped && rtk_output.len() < plain.len() {
+    // Capping hides matches and clips lines, which the agent pays back with a re-run, so the
+    // grouped form must buy a real saving: at least a third of the faithful output. Unless
+    // only the grouped form fits what the agent sees: the faithful one would lose its tail,
+    // and with it the files and overflow hints the grouped form keeps.
+    let budget = crate::core::config::limits().agent_output_max_chars;
+    let (grouped_chars, plain_chars) = (rtk_output.chars().count(), plain.chars().count());
+    let output = if capped
+        && (grouped_chars * 3 <= plain_chars * 2
+            || (grouped_chars <= budget && plain_chars > budget))
+    {
         rtk_output
     } else {
         plain
@@ -1128,7 +1148,15 @@ fn has_format_flag<T: AsRef<str>>(engine: Engine, extra_args: &[T]) -> bool {
         .any(|t| is_format_flag_token(engine, t.kind, t.text))
 }
 
-fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &str) -> String {
+/// An unlocated line up to this many clip windows long is shown whole.
+const UNLOCATED_WHOLE_WINDOWS: usize = 4;
+
+fn clean_line(
+    line: &str,
+    max_len: usize,
+    context_re: Option<&Regex>,
+    locate: Option<&Locator>,
+) -> String {
     let trimmed = line.trim();
 
     if let Some(re) = context_re
@@ -1140,38 +1168,328 @@ fn clean_line(line: &str, max_len: usize, context_re: Option<&Regex>, pattern: &
         }
     }
 
-    if trimmed.len() <= max_len {
-        trimmed.to_string()
+    let char_len = trimmed.chars().count();
+    if char_len <= max_len {
+        return trimmed.to_string();
+    }
+
+    // Place the window on the engine's actual match, not a literal search for the pattern
+    // text, which misses every real regex (`fn\s+run`) and so cut away the very match the
+    // agent searched for. The match offset is taken on the line itself: lowercasing first
+    // can change its length and pushed the window past the end of the line.
+    // No trustworthy position (PCRE, `-w`, a mid-pattern BRE `^`), or a match too long for
+    // the window: a clip could cut away the match, so the line stays whole. Past a few
+    // windows (minified code, data) a whole line would swamp the agent's output cap, so it
+    // is cut at the head and says the match may lie past the cut.
+    // The match is found on the line as the engine saw it: trimmed first, `^foo` would match
+    // a line that starts with spaces. A match reaching into the trimmed ends counts as none.
+    let lead = line.chars().count() - line.trim_start().chars().count();
+    let Some((match_start, match_end)) = locate
+        .and_then(|re| re.find_chars(line))
+        .filter(|&(start, end)| start >= lead && end <= lead + char_len)
+        .map(|(start, end)| (start - lead, end - lead))
+        .filter(|(start, end)| end - start <= max_len)
+    else {
+        if char_len <= UNLOCATED_WHOLE_WINDOWS * max_len {
+            return trimmed.to_string();
+        }
+        let head: String = trimmed.chars().take(max_len).collect();
+        return format!(
+            "{head}... [+{} chars cut; match position unknown]",
+            char_len - max_len
+        );
+    };
+
+    // The whole match inside the window, a third of it ahead of the match where room allows.
+    let start = match_start
+        .saturating_sub(max_len / 3)
+        .max(match_end.saturating_sub(max_len))
+        .min(char_len - max_len);
+    let end = start + max_len;
+    let slice: String = trimmed.chars().skip(start).take(max_len).collect();
+    if start > 0 && end < char_len {
+        format!("...{}...", slice)
+    } else if start > 0 {
+        format!("...{}", slice)
     } else {
-        let lower = trimmed.to_lowercase();
-        let pattern_lower = pattern.to_lowercase();
+        format!("{}...", slice)
+    }
+}
 
-        if let Some(pos) = lower.find(&pattern_lower) {
-            let char_pos = lower[..pos].chars().count();
-            let chars: Vec<char> = trimmed.chars().collect();
-            let char_len = chars.len();
+/// The language the engine reads its patterns in. The last mode flag wins, as in both engines.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PatternDialect {
+    Fixed,
+    /// grep's default BRE, where `\+ \? \| \( \) \{ \}` are the operators.
+    Basic,
+    /// grep -E: bare operators as in Rust, but its escapes and bracket expressions differ.
+    Extended,
+    /// rg's Rust regex.
+    Regex,
+    /// grep -P and rg's PCRE2 engine: lookaround and other syntax Rust's regex lacks.
+    Pcre,
+}
 
-            let start = char_pos.saturating_sub(max_len / 3);
-            let end = (start + max_len).min(char_len);
-            let start = if end == char_len {
-                end.saturating_sub(max_len)
-            } else {
-                start
-            };
-
-            let slice: String = chars[start..end].iter().collect();
-            if start > 0 && end < char_len {
-                format!("...{}...", slice)
-            } else if start > 0 {
-                format!("...{}", slice)
-            } else {
-                format!("{}...", slice)
+fn pattern_dialect<T: AsRef<str>>(engine: Engine, args: &[T]) -> PatternDialect {
+    let tokens = tokenize_search_args(args, engine);
+    let mut dialect = match engine {
+        Engine::Grep => PatternDialect::Basic,
+        Engine::Rg => PatternDialect::Regex,
+    };
+    // rg keeps -F apart from the engine: -F wins over any engine until --no-fixed-strings.
+    let mut rg_fixed = false;
+    for t in arg_tokenizer::before_dashdash(&tokens) {
+        match (engine, t.kind, t.text) {
+            (Engine::Rg, TokenKind::Short, "F")
+            | (Engine::Rg, TokenKind::Long, "fixed-strings") => rg_fixed = true,
+            (Engine::Rg, TokenKind::Long, "no-fixed-strings") => rg_fixed = false,
+            (Engine::Rg, TokenKind::Short, "P") | (Engine::Rg, TokenKind::Long, "pcre2") => {
+                dialect = PatternDialect::Pcre
             }
-        } else {
-            let t: String = trimmed.chars().take(max_len - 3).collect();
-            format!("{}...", t)
+            (Engine::Rg, TokenKind::Long, "no-pcre2") => dialect = PatternDialect::Regex,
+            (Engine::Rg, TokenKind::Long, "engine") => {
+                dialect = match t.attached.or_else(|| t.value(&tokens)) {
+                    Some("default") => PatternDialect::Regex,
+                    _ => PatternDialect::Pcre,
+                }
+            }
+            (Engine::Grep, TokenKind::Short, "F")
+            | (Engine::Grep, TokenKind::Long, "fixed-strings") => dialect = PatternDialect::Fixed,
+            (Engine::Grep, TokenKind::Short, "G")
+            | (Engine::Grep, TokenKind::Long, "basic-regexp") => dialect = PatternDialect::Basic,
+            (Engine::Grep, TokenKind::Short, "E")
+            | (Engine::Grep, TokenKind::Long, "extended-regexp") => {
+                dialect = PatternDialect::Extended
+            }
+            (Engine::Grep, TokenKind::Short, "P")
+            | (Engine::Grep, TokenKind::Long, "perl-regexp") => dialect = PatternDialect::Pcre,
+            _ => {}
         }
     }
+    if rg_fixed {
+        PatternDialect::Fixed
+    } else {
+        dialect
+    }
+}
+
+/// Whether the engine ignores case, by the user's own flags (the last one wins). Smart case
+/// and unknown settings, such as an rg config file's, count as case-sensitive: a locator
+/// stricter than the engine finds a real match or none, never a lookalike.
+fn ignores_case<T: AsRef<str>>(engine: Engine, args: &[T]) -> bool {
+    let tokens = tokenize_search_args(args, engine);
+    let mut ignore = false;
+    for t in arg_tokenizer::before_dashdash(&tokens) {
+        match (engine, t.kind, t.text) {
+            (_, TokenKind::Short, "i") | (_, TokenKind::Long, "ignore-case") => ignore = true,
+            (Engine::Grep, TokenKind::Short, "y") => ignore = true,
+            (Engine::Grep, TokenKind::Long, "no-ignore-case")
+            | (Engine::Rg, TokenKind::Short, "s" | "S")
+            | (Engine::Rg, TokenKind::Long, "case-sensitive" | "smart-case") => ignore = false,
+            _ => {}
+        }
+    }
+    ignore
+}
+
+/// A grep pattern as the equivalent Rust regex. In a BRE (`basic`) the escaped and bare forms
+/// of `+ ? | ( ) { }` swap; an ERE keeps them.
+///
+/// `None` for anything the two could read differently: an escape GNU grep does not define as
+/// Rust does (`\d`, `\x41`, back-references, the buffer anchors `` \` `` and `\'`), an ERE
+/// `(?` (a Rust flag group), a `{,n}` interval, a BRE `^` or `$` away from the pattern's
+/// ends (literal to grep, an anchor to Rust), and inside a bracket expression a backslash, a
+/// nested `[` or Rust's `&&`/`--`/`~~` set operators, all literal to grep.
+///
+/// The result runs on bytes with Unicode off, as grep reads text in the C locale, the only
+/// one the grep locator serves.
+fn posix_to_regex(pattern: &str, basic: bool) -> Option<String> {
+    const SWAPPED: &str = "+?|(){}";
+    const WORD_AND_SPACE: &str = "wWsSbB<>";
+    let mut out = String::with_capacity(pattern.len() + 8);
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next()? {
+                n if SWAPPED.contains(n) && basic => out.push(n),
+                // Rust's `\b{start}` and kin; GNU reads `{` there as a literal.
+                'b' | 'B' if chars.peek() == Some(&'{') => return None,
+                '`' | '\'' => return None,
+                n if n.is_ascii_punctuation() || WORD_AND_SPACE.contains(n) => {
+                    out.push('\\');
+                    out.push(n);
+                }
+                _ => return None,
+            },
+            '^' if basic && !out.is_empty() => return None,
+            '$' if basic && chars.peek().is_some() => return None,
+            '[' => {
+                out.push('[');
+                if chars.peek() == Some(&'^') {
+                    out.push(chars.next()?);
+                }
+                if chars.peek() == Some(&']') {
+                    out.push_str("\\]");
+                    chars.next();
+                }
+                loop {
+                    match chars.next()? {
+                        ']' => break,
+                        '\\' => return None,
+                        '[' if chars.peek() == Some(&':') => {
+                            out.push('[');
+                            for k in chars.by_ref() {
+                                out.push(k);
+                                if k == ']' {
+                                    break;
+                                }
+                            }
+                        }
+                        '[' => return None,
+                        k @ ('&' | '-' | '~') if chars.peek() == Some(&k) => return None,
+                        k => out.push(k),
+                    }
+                }
+                out.push(']');
+            }
+            '(' if !basic && chars.peek() == Some(&'?') => return None,
+            c if SWAPPED.contains(c) && basic => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    // GNU reads `{,n}` as 0 to n repeats.
+    (!out.contains("{,")).then_some(out)
+}
+
+/// How the engine reads text.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Charset {
+    /// grep in the C locale: one byte per character, ASCII classes, case and ranges.
+    Bytes,
+    /// rg, always.
+    Utf8,
+}
+
+/// Whether grep runs in the C locale, by what it inherits: the first non-empty of `LC_ALL`,
+/// `LC_CTYPE` and `LANG` for its character type, and of `LC_ALL`, `LC_COLLATE` and `LANG`
+/// for its bracket ranges, each C or POSIX or unset (agent shells set none). A UTF-8 or
+/// other locale is not modelled: its classes, case folding and ranges follow tables Rust
+/// does not share, and a missing one falls back to C without saying so.
+fn grep_in_c_locale() -> bool {
+    let effective = |category: Option<String>| {
+        [user_env::var("LC_ALL"), category, user_env::var("LANG")]
+            .into_iter()
+            .flatten()
+            .find(|v| !v.is_empty())
+    };
+    [
+        effective(user_env::var("LC_CTYPE")),
+        effective(user_env::var("LC_COLLATE")),
+    ]
+    .iter()
+    .all(|v| matches!(v.as_deref(), None | Some("C" | "POSIX")))
+}
+
+/// The match a clipped line is centred on.
+enum Locator {
+    Chars(Regex),
+    Bytes(regex::bytes::Regex),
+}
+
+impl Locator {
+    /// The leftmost match as char offsets into `line`, widened to whole chars: a byte
+    /// locator can stop inside a multi-byte character.
+    fn find_chars(&self, line: &str) -> Option<(usize, usize)> {
+        let (start, end) = match self {
+            Locator::Chars(re) => re.find(line).map(|m| (m.start(), m.end()))?,
+            Locator::Bytes(re) => re.find(line.as_bytes()).map(|m| (m.start(), m.end()))?,
+        };
+        let start = (0..=start).rev().find(|&i| line.is_char_boundary(i))?;
+        let end = (end..=line.len()).find(|&i| line.is_char_boundary(i))?;
+        let first = line[..start].chars().count();
+        Some((first, first + line[start..end].chars().count()))
+    }
+}
+
+/// Finds the match a clipped line is centred on, reading each pattern (and each line of a
+/// multi-line one, which both engines take as separate patterns) in the engine's dialect and
+/// charset. A pattern the locator cannot read as the engine does is not located at all, so
+/// its line stays whole: its literal spelling is no match.
+fn match_locator(
+    patterns: &[String],
+    dialect: PatternDialect,
+    ignore_case: bool,
+    charset: Charset,
+) -> Option<Locator> {
+    let pieces: Vec<&str> = patterns
+        .iter()
+        .flat_map(|p| p.split('\n'))
+        .filter(|p| !p.is_empty())
+        .collect();
+    if pieces.is_empty() {
+        return None;
+    }
+    let translated = pieces
+        .iter()
+        .map(|p| match dialect {
+            PatternDialect::Fixed => Some(regex::escape(p)),
+            PatternDialect::Basic => posix_to_regex(p, true),
+            PatternDialect::Extended => posix_to_regex(p, false),
+            PatternDialect::Regex => Some(p.to_string()),
+            PatternDialect::Pcre => None,
+        })
+        .map(|p| p.map(|p| format!("(?:{p})")))
+        .collect::<Option<Vec<String>>>()?;
+    let alternation = translated.join("|");
+    match charset {
+        Charset::Utf8 => regex::RegexBuilder::new(&alternation)
+            .case_insensitive(ignore_case)
+            .build()
+            .ok()
+            .map(Locator::Chars),
+        Charset::Bytes => regex::bytes::RegexBuilder::new(&alternation)
+            .case_insensitive(ignore_case)
+            .unicode(false)
+            .build()
+            .ok()
+            .map(Locator::Bytes),
+    }
+}
+
+/// The locator for this search, or none where its matches could differ from the engine's:
+/// PCRE; `-w` and `-x`, whose word and line boundaries the locator does not model; rg's
+/// `--no-unicode` or an unexamined config file; and grep outside the C locale.
+fn locator_for<T: AsRef<str>>(engine: Engine, args: &[T], patterns: &[String]) -> Option<Locator> {
+    // rg loads flags from this file before its CLI arguments. Its effective
+    // dialect, case rules and Unicode mode may therefore differ from ours.
+    if engine == Engine::Rg
+        && crate::core::user_env::var_os("RIPGREP_CONFIG_PATH").is_some_and(|path| !path.is_empty())
+    {
+        return None;
+    }
+    let tokens = tokenize_search_args(args, engine);
+    let unmodelled = arg_tokenizer::before_dashdash(&tokens).iter().any(|t| {
+        (t.kind == TokenKind::Short && matches!(t.text, "w" | "x"))
+            || (t.kind == TokenKind::Long
+                && matches!(t.text, "word-regexp" | "line-regexp" | "no-unicode"))
+    });
+    if unmodelled {
+        return None;
+    }
+    let charset = match engine {
+        Engine::Grep if grep_in_c_locale() => Charset::Bytes,
+        Engine::Grep => return None,
+        Engine::Rg => Charset::Utf8,
+    };
+    match_locator(
+        patterns,
+        pattern_dialect(engine, args),
+        ignores_case(engine, args),
+        charset,
+    )
 }
 
 fn compact_path(path: &str) -> String {
@@ -1196,10 +1514,19 @@ fn compact_path(path: &str) -> String {
 mod tests {
     use super::*;
 
+    fn locator(pattern: &str) -> Option<Locator> {
+        match_locator(
+            &[pattern.to_string()],
+            PatternDialect::Regex,
+            true,
+            Charset::Utf8,
+        )
+    }
+
     #[test]
     fn test_clean_line() {
         let line = "            const result = someFunction();";
-        let cleaned = clean_line(line, 50, None, "result");
+        let cleaned = clean_line(line, 50, None, locator("result").as_ref());
         assert!(!cleaned.starts_with(' '));
         assert!(cleaned.len() <= 50);
     }
@@ -1260,15 +1587,306 @@ mod tests {
     fn test_clean_line_multibyte() {
         // Thai text that exceeds max_len in bytes
         let line = "  สวัสดีครับ นี่คือข้อความที่ยาวมากสำหรับทดสอบ  ";
-        let cleaned = clean_line(line, 20, None, "ครับ");
+        let cleaned = clean_line(line, 20, None, locator("ครับ").as_ref());
         // Should not panic
         assert!(!cleaned.is_empty());
     }
 
     #[test]
+    fn test_clean_line_centres_on_a_regex_match() {
+        // A literal search for `fn\s+run` finds nothing, so the old window kept the head of
+        // the line and cut the match away.
+        let line = format!("{} fn   run() {{}}", "x".repeat(200));
+        let cleaned = clean_line(&line, 40, None, locator(r"fn\s+run").as_ref());
+        assert!(cleaned.contains("fn   run()"), "{cleaned}");
+        assert!(cleaned.starts_with("..."), "{cleaned}");
+    }
+
+    #[test]
+    fn test_clean_line_survives_lowercase_that_changes_length() {
+        // 'İ' lowercases to two chars; offsets taken on the lowercased copy overshot the line.
+        let line = format!("{}needle{}", "İ".repeat(60), "y".repeat(60));
+        let cleaned = clean_line(&line, 20, None, locator("needle").as_ref());
+        assert!(cleaned.contains("needle"), "{cleaned}");
+    }
+
+    #[test]
+    fn test_match_locator_gives_up_on_a_pattern_rust_rejects() {
+        // Its literal spelling is no match the engine would make, so nothing is located.
+        assert!(locator("a(b").is_none());
+        let pcre = match_locator(
+            &["(?<=foo)bar".into()],
+            PatternDialect::Pcre,
+            false,
+            Charset::Utf8,
+        );
+        assert!(pcre.is_none());
+    }
+
+    #[test]
+    fn test_grep_in_c_locale_needs_c_character_type_and_collation() {
+        use user_env::with_vars;
+        let at = |all, ctype, collate, lang| {
+            with_vars(
+                &[
+                    ("LC_ALL", all),
+                    ("LC_CTYPE", ctype),
+                    ("LC_COLLATE", collate),
+                    ("LANG", lang),
+                ],
+                grep_in_c_locale,
+            )
+        };
+        assert!(at(None, None, None, None));
+        assert!(at(None, Some("POSIX"), Some("C"), None));
+        assert!(at(Some("C"), None, None, Some("en_AU.UTF-8")));
+        assert!(at(Some(""), None, None, None));
+        assert!(!at(None, None, None, Some("C.UTF-8")));
+        assert!(!at(None, Some("en_AU.UTF-8"), None, None));
+        // Ranges follow LC_COLLATE even when the character type is C.
+        assert!(!at(None, Some("C"), Some("en_AU.UTF-8"), None));
+    }
+
+    #[test]
+    fn test_a_byte_locator_reads_as_the_c_locale_does() {
+        let bytes = |p: &str| {
+            match_locator(
+                &[p.to_string()],
+                PatternDialect::Basic,
+                false,
+                Charset::Bytes,
+            )
+            .unwrap()
+        };
+        // In the C locale `.` is one byte, so `a..b` matches the two bytes of `é`, and a
+        // match that stops inside a character widens to the whole character.
+        assert_eq!(bytes("a..b").find_chars("x aéb"), Some((2, 5)));
+        assert_eq!(bytes("a.").find_chars("aé"), Some((0, 2)));
+        assert_eq!(bytes("a.b").find_chars("aéb axb"), Some((4, 7)));
+        // `\s` and POSIX classes are ASCII, as grep's are there.
+        assert_eq!(
+            bytes(r"\sneedle").find_chars("\u{2003}needle needle"),
+            Some((7, 14))
+        );
+        assert_eq!(
+            bytes("[^[:alpha:]]needle").find_chars("éneedle"),
+            Some((0, 7))
+        );
+    }
+
+    #[test]
+    fn test_locator_for_skips_rg_without_unicode() {
+        let patterns = ["needle".to_string()];
+        assert!(locator_for(Engine::Rg, &["--no-unicode", "needle"], &patterns).is_none());
+    }
+
+    #[test]
+    fn test_locator_for_refuses_unexamined_rg_configuration() {
+        let patterns = ["needle".to_string()];
+        for config in [None, Some(""), Some("rg.conf")] {
+            let located = user_env::with_vars(&[("RIPGREP_CONFIG_PATH", config)], || {
+                locator_for(Engine::Rg, &["needle"], &patterns).is_some()
+            });
+            assert_eq!(located, config.is_none_or(str::is_empty));
+        }
+    }
+
+    #[test]
+    fn test_clean_line_keeps_the_whole_match_in_the_window() {
+        let line = format!("{} needle {}", "f".repeat(240), "g".repeat(240));
+        let re = locator(".*needle").unwrap();
+        // The match spans 247 chars, more than the window: the line stays whole.
+        assert_eq!(clean_line(&line, 160, None, Some(&re)), line);
+        // A 147-char match fits: the window ends on it rather than a third of a window past.
+        let re = locator("f{140} needle").unwrap();
+        let clipped = clean_line(&line, 160, None, Some(&re));
+        assert_ne!(clipped, line);
+        assert!(
+            clipped.contains(&format!("{} needle", "f".repeat(140))),
+            "{clipped}"
+        );
+    }
+
+    #[test]
+    fn test_locator_for_skips_whole_word_and_whole_line_searches() {
+        let patterns = ["needle".to_string()];
+        assert!(locator_for(Engine::Grep, &["-w", "needle"], &patterns).is_none());
+        assert!(locator_for(Engine::Rg, &["--word-regexp", "needle"], &patterns).is_none());
+        assert!(locator_for(Engine::Grep, &["-Fx", "needle"], &patterns).is_none());
+        assert!(locator_for(Engine::Rg, &["--line-regexp", "needle"], &patterns).is_none());
+        assert!(locator_for(Engine::Rg, &["needle"], &patterns).is_some());
+    }
+
+    #[test]
+    fn test_locator_for_grep_serves_only_the_c_locale() {
+        let patterns = ["needle".to_string()];
+        let grep = || locator_for(Engine::Grep, &["needle"], &patterns);
+        let locale = |lang| {
+            [
+                ("LC_ALL", None),
+                ("LC_CTYPE", None),
+                ("LC_COLLATE", None),
+                ("LANG", lang),
+            ]
+        };
+        assert!(user_env::with_vars(&locale(Some("C")), grep).is_some());
+        assert!(user_env::with_vars(&locale(Some("C.UTF-8")), grep).is_none());
+        let rg = || locator_for(Engine::Rg, &["needle"], &patterns);
+        assert!(user_env::with_vars(&[("LANG", Some("C.UTF-8"))], rg).is_some());
+    }
+
+    #[test]
+    fn test_clean_line_locates_on_the_line_as_the_engine_saw_it() {
+        // grep saw the leading spaces, so `^foo` is no match; `needle` is.
+        let line = format!("  foo {} needle {}", "f".repeat(240), "g".repeat(240));
+        let re = match_locator(
+            &["^foo|needle".to_string()],
+            PatternDialect::Extended,
+            false,
+            Charset::Bytes,
+        );
+        let clipped = clean_line(&line, 160, None, re.as_ref());
+        assert!(clipped.contains(" needle "), "{clipped}");
+    }
+
+    #[test]
+    fn test_pattern_dialect_follows_the_last_mode_flag() {
+        use PatternDialect::*;
+        let grep = |args: &[&str]| pattern_dialect(Engine::Grep, args);
+        let rg = |args: &[&str]| pattern_dialect(Engine::Rg, args);
+        assert_eq!(grep(&["x", "f"]), Basic);
+        assert_eq!(grep(&["-rnF", "x"]), Fixed);
+        assert_eq!(grep(&["--fixed-strings", "x"]), Fixed);
+        assert_eq!(grep(&["-F", "-E", "x"]), Extended);
+        assert_eq!(grep(&["-P", "-G", "x"]), Basic);
+        assert_eq!(grep(&["--", "-F"]), Basic);
+        assert_eq!(grep(&["-e", "-F", "f"]), Basic);
+        assert_eq!(rg(&["-e", "-F", "f"]), Regex);
+        assert_eq!(rg(&["x"]), Regex);
+        assert_eq!(rg(&["-F", "x"]), Fixed);
+        assert_eq!(rg(&["-F", "--no-fixed-strings", "x"]), Regex);
+        // rg's -E is --encoding, not a pattern mode.
+        assert_eq!(rg(&["-F", "-E", "utf8", "x"]), Fixed);
+        assert_eq!(grep(&["-P", "x"]), Pcre);
+        assert_eq!(rg(&["--pcre2", "x"]), Pcre);
+        assert_eq!(rg(&["-P", "--no-pcre2", "x"]), Regex);
+        assert_eq!(rg(&["--engine", "auto", "x"]), Pcre);
+        assert_eq!(rg(&["--engine=default", "x"]), Regex);
+        // The engine flags leave rg's -F alone, and -F overrides any engine.
+        assert_eq!(rg(&["-F", "--no-pcre2", "x"]), Fixed);
+        assert_eq!(rg(&["-F", "--engine=default", "x"]), Fixed);
+        assert_eq!(rg(&["-F", "-P", "x"]), Fixed);
+        assert_eq!(rg(&["-P", "-F", "--no-fixed-strings", "x"]), Pcre);
+    }
+
+    #[test]
+    fn test_ignores_case_only_when_the_flags_say_so() {
+        let grep = |args: &[&str]| ignores_case(Engine::Grep, args);
+        let rg = |args: &[&str]| ignores_case(Engine::Rg, args);
+        assert!(!grep(&["x"]));
+        assert!(grep(&["-ri", "x"]));
+        assert!(grep(&["-y", "x"]));
+        assert!(!grep(&["-i", "--no-ignore-case", "x"]));
+        assert!(!grep(&["--", "-i"]));
+        assert!(!rg(&["x"]));
+        // Smart case is decided on rg's parsed regex (`\x41` is uppercase); not modelled.
+        assert!(!rg(&["-S", "x"]));
+        assert!(!rg(&["-i", "-S", "x"]));
+        assert!(!rg(&["-i", "-s", "x"]));
+    }
+
+    #[test]
+    fn test_clean_line_keeps_a_line_whole_without_a_located_match() {
+        let line = format!("{} a^b {}", "f".repeat(100), "g".repeat(100));
+        let re = match_locator(
+            &["a^b".to_string()],
+            PatternDialect::Basic,
+            false,
+            Charset::Bytes,
+        );
+        assert!(re.is_none());
+        assert_eq!(clean_line(&line, 60, None, re.as_ref()), line);
+        // Past 4 windows the head is kept and the clip says the match may lie past the cut.
+        assert_eq!(
+            clean_line(&line, 40, None, re.as_ref()),
+            format!(
+                "{}... [+165 chars cut; match position unknown]",
+                "f".repeat(40)
+            )
+        );
+        // Even when the head happens to hold the match.
+        let head_match = format!("needle {}", "f".repeat(700));
+        assert!(clean_line(&head_match, 160, None, None).ends_with("match position unknown]"));
+    }
+
+    #[test]
+    fn test_posix_to_regex_swaps_bre_operators_and_refuses_what_differs() {
+        let bre = |p| posix_to_regex(p, true);
+        let ere = |p| posix_to_regex(p, false);
+        // A BRE `^` or `$` is an anchor only at the pattern's ends; GNU reads it as a literal
+        // elsewhere. An ERE's are anchors anywhere, as in Rust.
+        assert_eq!(bre("^a$").as_deref(), Some("^a$"));
+        assert_eq!(bre(r"a\?^foo"), None);
+        assert_eq!(bre("a$b"), None);
+        assert_eq!(ere("a|^b$").as_deref(), Some("a|^b$"));
+        // GNU's `{,n}` interval, and Rust's `\b{start}`, which GNU reads as a literal brace.
+        assert_eq!(ere("a{,2}b"), None);
+        assert_eq!(bre(r"a\{,2\}b"), None);
+        assert_eq!(ere(r"\b{start}foo"), None);
+        assert_eq!(ere(r"\bfoo\b").as_deref(), Some(r"\bfoo\b"));
+        assert_eq!(bre("[^[:alpha:]]x").as_deref(), Some("[^[:alpha:]]x"));
+        assert_eq!(bre(r"a\+b").as_deref(), Some("a+b"));
+        assert_eq!(bre(r"f(x)\|g\{2\}").as_deref(), Some(r"f\(x\)|g{2}"));
+        assert_eq!(bre(r"\.\*\<w\>\s").as_deref(), Some(r"\.\*\<w\>\s"));
+        assert_eq!(ere(r"a+\+(b|c)").as_deref(), Some(r"a+\+(b|c)"));
+        assert_eq!(bre("[]a-c[:digit:]]").as_deref(), Some(r"[\]a-c[:digit:]]"));
+        assert_eq!(bre("[^]x]").as_deref(), Some(r"[^\]x]"));
+        // Rust reads these differently from GNU grep.
+        for p in [
+            r"\d", r"\x41", r"\(a\)\1", r"\`a", r"a\'", r"[\n]", "[a&&b]", "[[=a=]]",
+        ] {
+            assert_eq!(bre(p), None, "{p}");
+        }
+        assert_eq!(ere("(?i)a"), None);
+        assert_eq!(bre("a\\"), None);
+        assert_eq!(bre("[ab"), None);
+    }
+
+    #[test]
+    fn test_match_locator_reads_each_dialect() {
+        let line = format!("aXb {} a.b aab {}", "f".repeat(60), "g".repeat(60));
+        let at = |patterns: &[&str], d| {
+            let patterns: Vec<String> = patterns.iter().map(|p| p.to_string()).collect();
+            match_locator(&patterns, d, false, Charset::Utf8)
+                .and_then(|re| re.find_chars(&line))
+                .map(|(s, e)| line.chars().skip(s).take(e - s).collect::<String>())
+        };
+        assert_eq!(at(&["a.b"], PatternDialect::Fixed).as_deref(), Some("a.b"));
+        assert_eq!(at(&["a.b"], PatternDialect::Regex).as_deref(), Some("aXb"));
+        assert_eq!(
+            at(&[r"a\+b"], PatternDialect::Basic).as_deref(),
+            Some("aab")
+        );
+        assert_eq!(
+            at(&["zz", "a.b"], PatternDialect::Fixed).as_deref(),
+            Some("a.b")
+        );
+        assert_eq!(
+            at(&["zz\na.b"], PatternDialect::Fixed).as_deref(),
+            Some("a.b")
+        );
+        // One pattern the locator cannot read leaves the whole search unlocated.
+        assert_eq!(at(&["a.b", r"\d"], PatternDialect::Basic), None);
+        assert_eq!(
+            at(&[r"a\.b"], PatternDialect::Extended).as_deref(),
+            Some("a.b")
+        );
+    }
+
+    #[test]
     fn test_clean_line_emoji() {
         let line = "🎉🎊🎈🎁🎂🎄 some text 🎃🎆🎇✨";
-        let cleaned = clean_line(line, 15, None, "text");
+        let cleaned = clean_line(line, 15, None, locator("text").as_ref());
         assert!(!cleaned.is_empty());
     }
 

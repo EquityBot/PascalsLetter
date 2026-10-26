@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk?style=flat&labelColor=000000&color=66023C" alt="Release"></a>
-  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=flat&labelColor=000000&color=66023C" alt="License: Apache 2.0"></a>
+  <a href="#licença"><img src="https://img.shields.io/badge/License-Apache--2.0%20%2B%20BUSL--1.1-66023C?style=flat&labelColor=000000&color=66023C" alt="License: Apache-2.0 and BUSL-1.1"></a>
   <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1470188214710046894?label=Discord&logo=discord&style=flat&labelColor=000000&logoColor=E5E4E2&color=66023C" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk?style=flat&labelColor=000000&color=66023C" alt="Homebrew"></a>
 </p>
@@ -90,7 +90,17 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 ### Cargo
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk
+cargo install --git https://github.com/rtk-ai/rtk rtk
+```
+
+### Edição Apache-2.0 (apenas código aberto, uso comercial permitido)
+
+O mesmo binário `rtk` compilado sem o motor de compressão BUSL-1.1: o sistema de reescrita de hooks e todos os filtros de comandos, apenas sob Apache-2.0.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | RTK_EDITION=oss sh
+brew install rtk-ai/tap/rtk-oss
+cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 ```
 
 ### Verificação
@@ -190,6 +200,8 @@ Junte-se à comunidade no [Discord](https://discord.gg/RySmvNF5kF).
 ## Licença
 
 Apache License 2.0 - veja [LICENSE](LICENSE) para detalhes.
+
+> `engine/` and `proxy/` are licensed BUSL-1.1 — see their LICENSE files.
 
 ## Aviso Legal
 

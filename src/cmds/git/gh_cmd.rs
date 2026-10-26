@@ -6,14 +6,17 @@
 use crate::core::arg_tokenizer::{self, Dialect, TokenKind, ValueSpec};
 use crate::core::args_utils;
 use crate::core::runner::{self, RunOptions};
-use crate::core::shell::quote_word;
+use crate::core::shell::{display_args, quote_word, with_args};
+use crate::core::stream::status_to_exit_code;
 use crate::core::truncate::CAP_LIST;
-use crate::core::utils::{ok_confirmation, resolved_command, truncate};
+use crate::core::utils::{ChildArgExt, ok_confirmation, resolved_command, truncate};
+use crate::core::{tee, tracking};
 use crate::git_cmd;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use regex::Regex;
 use serde_json::Value;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::LazyLock;
 
 static HTML_COMMENT_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?s)<!--.*?-->").unwrap());
@@ -262,7 +265,7 @@ where
     )
 }
 
-pub fn run(subcommand: &str, args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
+pub fn run(subcommand: &str, args: &[String], verbose: u8) -> Result<i32> {
     // clap carves `subcommand` out of the same trailing region as `args`, so the stripped `--`
     // has to be restored over the whole region — over `args` alone it lands one token off.
     let mut region: Vec<String> = Vec::with_capacity(args.len() + 1);
@@ -292,10 +295,10 @@ pub fn run(subcommand: &str, args: &[String], verbose: u8, ultra_compact: bool) 
     }
 
     match subcommand {
-        "pr" => run_pr(args, verbose, ultra_compact),
-        "issue" => run_issue(args, verbose, ultra_compact),
-        "run" => run_workflow(args, verbose, ultra_compact),
-        "repo" => run_repo(args, verbose, ultra_compact),
+        "pr" => run_pr(args, verbose),
+        "issue" => run_issue(args, verbose),
+        "run" => run_workflow(args, verbose),
+        "repo" => run_repo(args, verbose),
         "api" => run_api(args, verbose),
         _ => {
             // Unknown subcommand, pass through
@@ -316,16 +319,16 @@ fn split_gh_region(region: &[String]) -> Option<(&str, &[String])> {
     }
 }
 
-fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn run_pr(args: &[String], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         return run_passthrough("gh", "pr", args);
     }
 
     match args[0].as_str() {
-        "list" => list_prs(&args[1..], verbose, ultra_compact),
-        "view" => view_pr(&args[1..], verbose, ultra_compact),
-        "checks" => pr_checks(&args[1..], verbose, ultra_compact),
-        "status" => pr_status(&args[1..], verbose, ultra_compact),
+        "list" => list_prs(&args[1..], verbose),
+        "view" => view_pr(&args[1..], verbose),
+        "checks" => pr_checks(&args[1..], verbose),
+        "status" => pr_status(&args[1..], verbose),
         "create" => pr_create(&args[1..], verbose),
         "merge" => pr_merge(&args[1..], verbose),
         "diff" => pr_diff(&args[1..], verbose),
@@ -335,7 +338,7 @@ fn run_pr(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
     }
 }
 
-fn list_prs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn list_prs(args: &[String], _verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("gh");
     cmd.args([
         "pr",
@@ -346,27 +349,19 @@ fn list_prs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
     for arg in args {
         cmd.arg(arg);
     }
-    run_gh_json(cmd, "pr list", |json| format_pr_list(json, ultra_compact))
+    run_gh_json(cmd, "pr list", format_pr_list)
 }
 
-fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
+fn format_pr_list(json: &Value) -> String {
     let prs = match json.as_array() {
         Some(prs) => prs,
         None => return String::new(),
     };
     if prs.is_empty() {
-        return if ultra_compact {
-            "No PRs\n".to_string()
-        } else {
-            "No Pull Requests\n".to_string()
-        };
+        return "No Pull Requests\n".to_string();
     }
     let mut out = String::new();
-    out.push_str(if ultra_compact {
-        "PRs\n"
-    } else {
-        "Pull Requests\n"
-    });
+    out.push_str("Pull Requests\n");
     let all_lines: Vec<String> = prs
         .iter()
         .map(|pr| {
@@ -374,7 +369,7 @@ fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
             let title = pr["title"].as_str().unwrap_or("???");
             let state = pr["state"].as_str().unwrap_or("???");
             let author = pr["author"]["login"].as_str().unwrap_or("???");
-            let icon = state_icon(state, ultra_compact);
+            let icon = state_icon(state);
             format!(
                 "  {} #{} {} ({})",
                 icon,
@@ -399,21 +394,12 @@ fn format_pr_list(json: &Value, ultra_compact: bool) -> String {
     out
 }
 
-fn state_icon(state: &str, ultra_compact: bool) -> &'static str {
-    if ultra_compact {
-        match state {
-            "OPEN" => "O",
-            "MERGED" => "M",
-            "CLOSED" => "C",
-            _ => "?",
-        }
-    } else {
-        match state {
-            "OPEN" => "[open]",
-            "MERGED" => "[merged]",
-            "CLOSED" => "[closed]",
-            _ => "[unknown]",
-        }
+fn state_icon(state: &str) -> &'static str {
+    match state {
+        "OPEN" => "[open]",
+        "MERGED" => "[merged]",
+        "CLOSED" => "[closed]",
+        _ => "[unknown]",
     }
 }
 
@@ -442,7 +428,7 @@ fn pr_status_json_fields() -> &'static str {
     "number,title,reviewDecision,statusCheckRollup"
 }
 
-fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn view_pr(args: &[String], _verbose: u8) -> Result<i32> {
     // `gh pr view` without an identifier defaults to the PR for the current branch.
     let (pr_number_opt, extra_args) = split_identifier(args, &view_takes_value);
     if should_passthrough_pr_view(&extra_args) {
@@ -468,10 +454,10 @@ fn view_pr(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
         Some(id) => format!("pr view {}", quote_word(id)),
         None => "pr view".to_string(),
     };
-    run_gh_json(cmd, &label, |json| format_pr_view(json, ultra_compact))
+    run_gh_json(cmd, &label, format_pr_view)
 }
 
-fn format_pr_view(json: &Value, ultra_compact: bool) -> String {
+fn format_pr_view(json: &Value) -> String {
     let mut out = String::new();
     let number = json["number"].as_i64().unwrap_or(0);
     let title = json["title"].as_str().unwrap_or("???");
@@ -480,7 +466,7 @@ fn format_pr_view(json: &Value, ultra_compact: bool) -> String {
     let url = json["url"].as_str().unwrap_or("");
     let mergeable = json["mergeable"].as_str().unwrap_or("UNKNOWN");
 
-    let icon = state_icon(state, ultra_compact);
+    let icon = state_icon(state);
     out.push_str(&format!("{} PR #{}: {}\n", icon, number, title));
     out.push_str(&format!("  {}\n", author));
 
@@ -524,17 +510,9 @@ fn format_pr_view(json: &Value, ultra_compact: bool) -> String {
                     || c["state"].as_str() == Some("FAILURE")
             })
             .count();
-        if ultra_compact {
-            if failed > 0 {
-                out.push_str(&format!("  [x]{}/{}  {} fail\n", passed, total, failed));
-            } else {
-                out.push_str(&format!("  {}/{}\n", passed, total));
-            }
-        } else {
-            out.push_str(&format!("  Checks: {}/{} passed\n", passed, total));
-            if failed > 0 {
-                out.push_str(&format!("  [warn] {} checks failed\n", failed));
-            }
+        out.push_str(&format!("  Checks: {}/{} passed\n", passed, total));
+        if failed > 0 {
+            out.push_str(&format!("  [warn] {} checks failed\n", failed));
         }
     }
 
@@ -557,7 +535,7 @@ fn format_pr_view(json: &Value, ultra_compact: bool) -> String {
     out
 }
 
-fn pr_checks(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32> {
+fn pr_checks(args: &[String], _verbose: u8) -> Result<i32> {
     // `gh pr checks` without an identifier defaults to the PR for the current branch.
     let (pr_number_opt, extra_args) = split_identifier(args, &pr_checks_takes_value);
     let mut cmd = resolved_command("gh");
@@ -673,7 +651,7 @@ fn parse_pr_check_line(line: &str) -> Option<(&str, &str, PrCheckStatus)> {
     (!name.is_empty()).then_some((name, link, status))
 }
 
-fn pr_status(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32> {
+fn pr_status(args: &[String], _verbose: u8) -> Result<i32> {
     if should_passthrough_pr_status(args) {
         let mut passthrough_args = Vec::with_capacity(args.len() + 1);
         passthrough_args.push("status".to_string());
@@ -752,30 +730,28 @@ fn format_pr_status_entry(pr: &Value) -> String {
     out
 }
 
-fn run_issue(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn run_issue(args: &[String], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         return run_passthrough("gh", "issue", args);
     }
 
     match args[0].as_str() {
-        "list" => list_issues(&args[1..], verbose, ultra_compact),
+        "list" => list_issues(&args[1..], verbose),
         "view" => view_issue(&args[1..], verbose),
         _ => run_passthrough("gh", "issue", args),
     }
 }
 
-fn list_issues(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn list_issues(args: &[String], _verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("gh");
     cmd.args(["issue", "list", "--json", "number,title,state,author"]);
     for arg in args {
         cmd.arg(arg);
     }
-    run_gh_json(cmd, "issue list", |json| {
-        format_issue_list(json, ultra_compact)
-    })
+    run_gh_json(cmd, "issue list", format_issue_list)
 }
 
-fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
+fn format_issue_list(json: &Value) -> String {
     let issues = match json.as_array() {
         Some(issues) => issues,
         None => return String::new(),
@@ -791,9 +767,7 @@ fn format_issue_list(json: &Value, ultra_compact: bool) -> String {
             let number = issue["number"].as_i64().unwrap_or(0);
             let title = issue["title"].as_str().unwrap_or("???");
             let state = issue["state"].as_str().unwrap_or("???");
-            let icon = if ultra_compact {
-                if state == "OPEN" { "O" } else { "C" }
-            } else if state == "OPEN" {
+            let icon = if state == "OPEN" {
                 "[open]"
             } else {
                 "[closed]"
@@ -877,19 +851,19 @@ fn format_issue_view(json: &Value) -> String {
     out
 }
 
-fn run_workflow(args: &[String], verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn run_workflow(args: &[String], verbose: u8) -> Result<i32> {
     if args.is_empty() {
         return run_passthrough("gh", "run", args);
     }
 
     match args[0].as_str() {
-        "list" => list_runs(&args[1..], verbose, ultra_compact),
+        "list" => list_runs(&args[1..], verbose),
         "view" => view_run(&args[1..], verbose),
         _ => run_passthrough("gh", "run", args),
     }
 }
 
-fn list_runs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> {
+fn list_runs(args: &[String], _verbose: u8) -> Result<i32> {
     let mut cmd = resolved_command("gh");
     cmd.args([
         "run",
@@ -901,41 +875,27 @@ fn list_runs(args: &[String], _verbose: u8, ultra_compact: bool) -> Result<i32> 
     for arg in args {
         cmd.arg(arg);
     }
-    run_gh_json(cmd, "run list", |json| format_run_list(json, ultra_compact))
+    run_gh_json(cmd, "run list", format_run_list)
 }
 
-fn format_run_list(json: &Value, ultra_compact: bool) -> String {
+fn format_run_list(json: &Value) -> String {
     let runs = match json.as_array() {
         Some(runs) => runs,
         None => return String::new(),
     };
     let mut out = String::new();
-    out.push_str(if ultra_compact {
-        "Runs\n"
-    } else {
-        "Workflow Runs\n"
-    });
+    out.push_str("Workflow Runs\n");
     for run in runs {
         let id = run["databaseId"].as_i64().unwrap_or(0);
         let name = run["name"].as_str().unwrap_or("???");
         let status = run["status"].as_str().unwrap_or("???");
         let conclusion = run["conclusion"].as_str().unwrap_or("");
-        let icon = if ultra_compact {
-            match conclusion {
-                "success" => "[ok]",
-                "failure" => "[x]",
-                "cancelled" => "X",
-                _ if status == "in_progress" => "~",
-                _ => "?",
-            }
-        } else {
-            match conclusion {
-                "success" => "[ok]",
-                "failure" => "[FAIL]",
-                "cancelled" => "[X]",
-                _ if status == "in_progress" => "[time]",
-                _ => "[pending]",
-            }
+        let icon = match conclusion {
+            "success" => "[ok]",
+            "failure" => "[FAIL]",
+            "cancelled" => "[X]",
+            _ if status == "in_progress" => "[time]",
+            _ => "[pending]",
         };
         out.push_str(&format!("  {} {} [{}]\n", icon, truncate(name, 50), id));
     }
@@ -1012,7 +972,7 @@ fn format_run_view(stdout: &str, run_id: &str) -> String {
     out
 }
 
-fn run_repo(args: &[String], _verbose: u8, _ultra_compact: bool) -> Result<i32> {
+fn run_repo(args: &[String], _verbose: u8) -> Result<i32> {
     let (subcommand, rest_args) = if args.is_empty() {
         ("view", args)
     } else {
@@ -1173,9 +1133,83 @@ fn pr_action(
 
 fn run_api(args: &[String], _verbose: u8) -> Result<i32> {
     // gh api is an explicit/advanced command — the user knows what they asked for.
-    // Converting JSON to a schema destroys all values and forces Claude to re-fetch.
-    // Passthrough preserves the full response and tracks metrics at 0% savings.
-    run_passthrough("gh", "api", args)
+    // Converting JSON to a schema destroys all values and forces Claude to re-fetch, so every
+    // value stays. What goes is GitHub's hypermedia: `*_url` links back into api.github.com,
+    // up to 70% of a repository, pull request or workflow-run object. The whole response is
+    // stored for `rtk recall`, so nothing needs a rerun (which could repeat a POST). A
+    // `--jq`/`--template` result is what the user selected, so it passes through untouched,
+    // as does anything not filtered: stdout is written back byte for byte, uncapped.
+    if args.iter().any(|a| is_api_selection_flag(a)) {
+        return run_passthrough("gh", "api", args);
+    }
+    let timer = tracking::TimedExecution::start();
+    let tracked = with_args("gh api", &display_args(args));
+    let mut cmd = resolved_command("gh");
+    cmd.arg("api")
+        .child_args(args)
+        .stdin(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let output = cmd.output().context("Failed to run gh api")?;
+    // Filtered only once the whole response is stored: without recovery, links stay.
+    let filtered = std::str::from_utf8(&output.stdout)
+        .ok()
+        .filter(|_| output.status.success())
+        .and_then(|raw| {
+            let (compact, dropped) = drop_api_links(raw)?;
+            Some((raw, compact, dropped, tee::force_tee_hint(raw, "gh-api")?))
+        });
+    let mut stdout = std::io::stdout().lock();
+    match filtered {
+        Some((raw, compact, dropped, hint)) => {
+            writeln!(stdout, "{compact}")?;
+            stdout.flush()?;
+            eprintln!("[rtk] dropped {dropped} {GITHUB_API} *_url links; {hint}");
+            timer.track(&tracked, &format!("rtk {tracked}"), raw, &compact);
+        }
+        None => {
+            stdout.write_all(&output.stdout)?;
+            stdout.flush()?;
+            timer.track_passthrough(&tracked, &format!("rtk {tracked}"));
+        }
+    }
+    Ok(status_to_exit_code(output.status))
+}
+
+/// `--jq`/`-q` and `--template`/`-t` in any spelling gh's flag parser takes: separate value,
+/// `=value`, or a short flag with its value attached (`-q.owner`).
+fn is_api_selection_flag(arg: &str) -> bool {
+    arg.starts_with("--jq")
+        || arg.starts_with("--template")
+        || (arg.starts_with("-q") || arg.starts_with("-t")) && !arg.starts_with("--")
+}
+
+const GITHUB_API: &str = "https://api.github.com/";
+
+/// The response without its api.github.com `*_url` links, and how many went. `None` when
+/// nothing went or the output is not a single JSON document (`--include` headers,
+/// `--paginate` pages without `--slurp`).
+fn drop_api_links(stdout: &str) -> Option<(String, usize)> {
+    let mut value = serde_json::from_str::<Value>(stdout).ok()?;
+    let dropped = strip_api_links(&mut value);
+    if dropped == 0 {
+        return None;
+    }
+    Some((serde_json::to_string(&value).ok()?, dropped))
+}
+
+fn strip_api_links(value: &mut Value) -> usize {
+    match value {
+        Value::Object(map) => {
+            let before = map.len();
+            map.retain(|key, v| {
+                !(key.ends_with("_url") && v.as_str().is_some_and(|s| s.starts_with(GITHUB_API)))
+            });
+            let here = before - map.len();
+            here + map.values_mut().map(strip_api_links).sum::<usize>()
+        }
+        Value::Array(items) => items.iter_mut().map(strip_api_links).sum(),
+        _ => 0,
+    }
 }
 
 // Edge case: error context is now "Failed to run {cmd}" (loses subcommand detail)
@@ -1195,6 +1229,57 @@ fn run_passthrough(cmd: &str, subcommand: &str, args: &[String]) -> Result<i32> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_drop_api_links_keeps_every_value_but_api_hypermedia() {
+        let raw = r#"{"id":1,"url":"https://api.github.com/repos/o/r","html_url":"https://github.com/o/r","forks_url":"https://api.github.com/repos/o/r/forks","clone_url":"https://github.com/o/r.git","download_url":"https://raw.githubusercontent.com/o/r/x","owner":{"login":"o","repos_url":"https://api.github.com/users/o/repos"},"items":[{"events_url":"https://api.github.com/x{/y}","note":"<b>"}],"homepage_url":null}"#;
+        let (out, dropped) = drop_api_links(raw).expect("links dropped");
+        assert_eq!(dropped, 3);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "id": 1,
+                "url": "https://api.github.com/repos/o/r",
+                "html_url": "https://github.com/o/r",
+                "clone_url": "https://github.com/o/r.git",
+                "download_url": "https://raw.githubusercontent.com/o/r/x",
+                "owner": {"login": "o"},
+                "items": [{"note": "<b>"}],
+                "homepage_url": null
+            })
+        );
+        // Key order is kept (serde_json `preserve_order`).
+        assert!(out.starts_with(r#"{"id":1,"url":"#), "{out}");
+    }
+
+    #[test]
+    fn test_drop_api_links_leaves_non_json_and_link_free_output_alone() {
+        let paged = "[{\"a\":1}][{\"b\":2}]";
+        assert_eq!(drop_api_links(paged), None);
+        let plain = "{\"name\": \"x\"}\n";
+        assert_eq!(drop_api_links(plain), None);
+    }
+
+    #[test]
+    fn test_api_selection_flags_pass_through() {
+        for flag in [
+            "-q",
+            "--jq",
+            "--jq=.x",
+            "-t",
+            "--template",
+            "--template={{.x}}",
+            "-q.owner",
+            "-q=.owner",
+            "-t{{.x}}",
+        ] {
+            assert!(is_api_selection_flag(flag), "{flag}");
+        }
+        for other in ["--paginate", "--slurp", "-i", "repos/o/r", "-f", "-X"] {
+            assert!(!is_api_selection_flag(other), "{other}");
+        }
+    }
 
     #[test]
     fn test_truncate() {
@@ -1910,7 +1995,7 @@ ___
             "mergeable": "MERGEABLE",
             "body": body,
         });
-        let out = format_pr_view(&json, false);
+        let out = format_pr_view(&json);
         assert!(
             out.contains("(body contained only badges/images/comments)"),
             "expected fallback note when body filters to empty, got:\n{}",
@@ -1930,7 +2015,7 @@ ___
             "mergeable": "MERGEABLE",
             "body": "## Summary\nFix the thing.\n",
         });
-        let out = format_pr_view(&json, false);
+        let out = format_pr_view(&json);
         assert!(
             !out.contains("(body contained only badges/images/comments)"),
             "fallback note should not fire when body has real content, got:\n{}",
@@ -1952,7 +2037,7 @@ ___
             "mergeable": "MERGEABLE",
             "body": "",
         });
-        let out = format_pr_view(&json, false);
+        let out = format_pr_view(&json);
         assert!(!out.contains("(body contained only badges/images/comments)"));
     }
 

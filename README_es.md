@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
   <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk?style=flat&labelColor=000000&color=66023C" alt="Release"></a>
-  <a href="https://opensource.org/licenses/Apache-2.0"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg?style=flat&labelColor=000000&color=66023C" alt="License: Apache 2.0"></a>
+  <a href="#licencia"><img src="https://img.shields.io/badge/License-Apache--2.0%20%2B%20BUSL--1.1-66023C?style=flat&labelColor=000000&color=66023C" alt="License: Apache-2.0 and BUSL-1.1"></a>
   <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1478373640461488159?label=Discord&logo=discord&style=flat&labelColor=000000&logoColor=E5E4E2&color=66023C" alt="Discord"></a>
   <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk?style=flat&labelColor=000000&color=66023C" alt="Homebrew"></a>
 </p>
@@ -89,7 +89,17 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 ### Cargo
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk
+cargo install --git https://github.com/rtk-ai/rtk rtk
+```
+
+### Edición Apache-2.0 (solo código abierto, uso comercial permitido)
+
+El mismo binario `rtk` compilado sin el motor de compresión BUSL-1.1: el sistema de reescritura de hooks y todos los filtros de comandos, solo bajo Apache-2.0.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | RTK_EDITION=oss sh
+brew install rtk-ai/tap/rtk-oss
+cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
 ```
 
 ### Verificacion
@@ -189,6 +199,8 @@ Unete a la comunidad en [Discord](https://discord.gg/RySmvNF5kF).
 ## Licencia
 
 Licencia Apache 2.0 - ver [LICENSE](LICENSE) para detalles.
+
+> `engine/` and `proxy/` are licensed BUSL-1.1 — see their LICENSE files.
 
 ## Descargo de responsabilidad
 

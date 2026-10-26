@@ -632,8 +632,9 @@ fn flush_failure_block(header: &mut String, body: &mut Vec<String>, failures: &m
 
 /// Filter cargo nextest output - show failures + compact summary
 fn filter_cargo_nextest(output: &str) -> String {
+    // nextest annotates `passed` in place, e.g. `2 passed (1 slow), 1 failed`
     let summary_re = regex::Regex::new(
-        r"Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run:\s+(\d+) passed(?:,\s+(\d+) failed)?(?:,\s+(\d+) skipped)?"
+        r"Summary \[\s*([\d.]+)s\]\s+(\d+) tests? run:\s+(\d+) passed(?:\s+\([^)]*\))?(?:,\s+(\d+) failed)?(?:,\s+(\d+) skipped)?"
     ).expect("invalid nextest summary regex");
 
     let starting_re = regex::Regex::new(r"Starting \d+ tests? across (\d+) binar(?:y|ies)")
@@ -1276,6 +1277,32 @@ pub(crate) fn filter_cargo_test(output: &str) -> String {
     result.trim().to_string()
 }
 
+/// Grouping key for a diagnostic headline, given the text after `error`/`warning`:
+/// a leading code (`[E0308]: ...`), else a trailing lint tag (`... [unused_variables]`),
+/// else the message. Brackets inside the message, as in `&[_]`, are not a tag.
+/// A tag must look like a lint name (lower case, with `_` or `::`), because message
+/// text can end in brackets too, as in a deprecation note `prefer [u8]`.
+fn clippy_rule(rest: &str) -> String {
+    if let Some((code, _)) = rest.strip_prefix('[').and_then(|r| r.split_once(']')) {
+        return code.to_string();
+    }
+    let message = rest.strip_prefix(": ").unwrap_or(rest);
+    let tag = message
+        .strip_suffix(']')
+        .and_then(|m| m.rsplit_once(" ["))
+        .map(|(_, tag)| tag)
+        .filter(|tag| is_lint_name(tag));
+    tag.unwrap_or(message).to_string()
+}
+
+fn is_lint_name(tag: &str) -> bool {
+    tag.starts_with(|c: char| c.is_ascii_lowercase())
+        && (tag.contains('_') || tag.contains("::"))
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == ':')
+}
+
 /// Filter cargo clippy output - show full error blocks, group warnings by lint rule
 fn filter_cargo_clippy(output: &str) -> String {
     let mut by_rule: HashMap<String, Vec<String>> = HashMap::new();
@@ -1331,21 +1358,8 @@ fn filter_cargo_clippy(output: &str) -> String {
                 warning_count += 1;
             }
 
-            // Extract rule/error-code from brackets for warning grouping
-            current_rule = if let Some(bracket_start) = line.rfind('[') {
-                if let Some(bracket_end) = line.rfind(']') {
-                    line[bracket_start + 1..bracket_end].to_string()
-                } else {
-                    line.to_string()
-                }
-            } else {
-                let prefix = if is_error_line {
-                    "error: "
-                } else {
-                    "warning: "
-                };
-                line.strip_prefix(prefix).unwrap_or(line).to_string()
-            };
+            let level = if is_error_line { "error" } else { "warning" };
+            current_rule = clippy_rule(&line[level.len()..]);
         } else if line.trim_start().starts_with("--> ") {
             let location = line.trim_start().trim_start_matches("--> ").to_string();
             if !current_rule.is_empty() {
@@ -1881,8 +1895,90 @@ warning: `rtk` (bin) generated 2 warnings
 "#;
         let result = filter_cargo_clippy(output);
         assert!(result.contains("0 errors, 2 warnings"));
-        assert!(result.contains("unused_variables"));
-        assert!(result.contains("clippy::too_many_arguments"));
+        assert!(
+            result.contains("  unused_variables (1x)"),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("  clippy::too_many_arguments (1x)"),
+            "got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_clippy_groups_same_tag() {
+        let output = r#"warning: unused variable: `x` [unused_variables]
+ --> src/a.rs:1:9
+
+warning: unused variable: `y` [unused_variables]
+ --> src/b.rs:2:9
+"#;
+        let result = filter_cargo_clippy(output);
+        assert!(
+            result.contains("  unused_variables (2x)"),
+            "got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_clippy_brackets_in_message_are_not_a_rule() {
+        let output = r#"    Checking demo v0.1.0
+warning: writing `&Vec` instead of `&[_]` involves a new object where a slice will do
+ --> src\lib.rs:4:13
+  |
+4 | pub fn b(v: &Vec<i32>) -> usize {
+  |             ^^^^^^^^^ help: change this to: `&[i32]`
+
+warning: indexing into `v[0]` may panic
+ --> src\lib.rs:9:5
+  |
+
+warning: `demo` (lib) generated 2 warnings
+"#;
+        let result = filter_cargo_clippy(output);
+        assert!(result.contains("0 errors, 2 warnings"), "got: {}", result);
+        assert!(
+            result.contains(
+                "writing `&Vec` instead of `&[_]` involves a new object where a slice will do (1x)"
+            ),
+            "got: {}",
+            result
+        );
+        assert!(
+            result.contains("indexing into `v[0]` may panic (1x)"),
+            "got: {}",
+            result
+        );
+        assert!(!result.contains("  _ ("), "got: {}", result);
+    }
+
+    #[test]
+    fn test_clippy_rule_keys() {
+        assert_eq!(clippy_rule("[E0308]: mismatched types"), "E0308");
+        assert_eq!(
+            clippy_rule(": unused variable: `x` [unused_variables]"),
+            "unused_variables"
+        );
+        assert_eq!(
+            clippy_rule(": too many [clippy::too_many_arguments]"),
+            "clippy::too_many_arguments"
+        );
+        assert_eq!(clippy_rule(": slice `&[_]`"), "slice `&[_]`");
+        assert_eq!(clippy_rule(": ends in a slot [_]"), "ends in a slot [_]");
+        assert_eq!(
+            clippy_rule(": use of deprecated function `old`: prefer [u8]"),
+            "use of deprecated function `old`: prefer [u8]"
+        );
+        assert_eq!(clippy_rule(": a] b [c"), "a] b [c");
+    }
+
+    #[test]
+    fn test_filter_cargo_clippy_reversed_brackets_do_not_panic() {
+        let result = filter_cargo_clippy("warning: a] b [c\n --> src/lib.rs:1:1\n");
+        assert!(result.contains("  a] b [c (1x)"), "got: {}", result);
     }
 
     #[test]
@@ -1924,6 +2020,7 @@ error: aborting due to 1 previous error
             result
         );
         assert!(result.contains("src/main.rs:10:5"), "got: {}", result);
+        assert!(result.contains("  E0308 (1x)"), "got: {}", result);
         assert!(
             result.contains("expected `i32`, found `&str`"),
             "got: {}",
@@ -2343,6 +2440,74 @@ error: test run failed
             result.matches("FAIL [").count(),
             1,
             "should have exactly 1 FAIL header (no post-summary duplicate): {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_slow_annotation_keeps_failed_and_skipped() {
+        // cargo-nextest 0.9.143 puts `(N slow)` directly after `passed` (#4420)
+        let output = r#"    Starting 3 tests across 1 binary (1 test skipped)
+        PASS [   0.004s] (1/3) scratch tests::passing
+        FAIL [   0.005s] (2/3) scratch tests::failing
+
+  stderr ───
+
+    thread 'tests::failing' panicked at src/lib.rs:14:9:
+    assertion `left == right` failed
+      left: 1
+     right: 2
+
+        SLOW [>  1.000s] (───────) scratch tests::slow
+        PASS [   2.502s] (3/3) scratch tests::slow
+────────────
+     Summary [   2.503s] 3 tests run: 2 passed (1 slow), 1 failed, 1 skipped
+        FAIL [   0.005s] (2/3) scratch tests::failing
+error: test run failed
+"#;
+        let result = filter_cargo_nextest(output);
+        assert!(
+            result.contains("cargo nextest: 2 passed, 1 failed, 1 skipped"),
+            "should keep failed and skipped counts: {}",
+            result
+        );
+        assert!(
+            result.contains("FAIL [   0.005s] (2/3) scratch tests::failing"),
+            "should keep the failure block: {}",
+            result
+        );
+        assert!(
+            result.contains("panicked"),
+            "should keep failure stderr: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_slow_annotation_all_pass() {
+        let output = r#"    Starting 2 tests across 1 binary
+        PASS [   0.004s] (1/2) scratch tests::passing
+        PASS [   2.502s] (2/2) scratch tests::slow
+────────────
+     Summary [   2.503s] 2 tests run: 2 passed (1 slow), 0 skipped
+"#;
+        let result = filter_cargo_nextest(output);
+        assert_eq!(
+            result, "cargo nextest: 2 passed (1 binary, 2.503s)",
+            "got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_filter_cargo_nextest_combined_annotation_keeps_failed_and_skipped() {
+        // cargo-nextest 0.9.143 with retries: `(1 slow, 1 flaky)` after `passed`
+        let output =
+            include_str!("../../../tests/fixtures/cargo_nextest_slow_flaky_failed_raw.txt");
+        let result = filter_cargo_nextest(output);
+        assert!(
+            result.contains("cargo nextest: 2 passed, 1 failed, 4 skipped (1 binary, 1.503s)"),
+            "should keep failed and skipped counts: {}",
             result
         );
     }

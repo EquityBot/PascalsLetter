@@ -71,7 +71,7 @@ pub(crate) fn track_tee_read(cmd: &str) {
 /// | Exit | Stdout   | Meaning                                                                  |
 /// |------|----------|--------------------------------------------------------------------------|
 /// | 0    | rewritten| Allow rules cover every command — hook may auto-allow the rewrite.       |
-/// | 1    | (none)   | No rewrite ([`decision::decide`] deferred) — hook passes through.        |
+/// | 1    | (none)   | No rewrite, or a deny rule matched inside a shell wrapper's script ([`decision::decide`] deferred) — hook passes through. |
 /// | 2    | (none)   | Deny rule matched — hook defers to the host's native deny.               |
 /// | 3    | rewritten| Ask rule, or allow rules short of every command (also with no rules) — hook rewrites, host prompts. |
 ///
@@ -224,12 +224,14 @@ mod tests {
         ///   Ask    → 3 (process::exit(3))
         ///   Default→ 3 (process::exit(3)) — grouped with Ask
         ///   Deny   → 2 (process::exit(2)) — handled before rewrite match
+        ///   Defer  → 1 (process::exit(1)) — passthrough, no rewrite
         fn expected_exit_code(verdict: &PermissionVerdict) -> i32 {
             match verdict {
                 PermissionVerdict::Allow => 0,
                 PermissionVerdict::Deny => 2,
                 PermissionVerdict::Ask => 3,
                 PermissionVerdict::Default => 3, // MUST be 3, not 0!
+                PermissionVerdict::Defer => 1,
             }
         }
 
@@ -243,6 +245,15 @@ mod tests {
                 3,
                 "Default verdict MUST exit with code 3 (ask), not 0 (allow)"
             );
+        }
+
+        #[test]
+        fn test_defer_verdict_maps_to_passthrough_exit_code() {
+            let deny = vec!["git push:*".to_string()];
+            let allow = vec!["*".to_string()];
+            let verdict = check_command_with_rules("env bash -c 'git push'", &deny, &[], &allow);
+            assert_eq!(verdict, PermissionVerdict::Defer);
+            assert_eq!(expected_exit_code(&verdict), 1);
         }
 
         #[test]

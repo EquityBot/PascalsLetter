@@ -36,7 +36,7 @@ pub struct Config {
 /// How much the agent is told about RTK by the instructions file `rtk init` writes.
 ///
 /// - `default`: output contract only. The agent never learns rtk exists.
-/// - `high`: adds what RTK is and its meta commands (`rtk gain`, `rtk proxy`, `RTK_DISABLED=1`).
+/// - `high`: adds what RTK is and its meta commands (`rtk gain`, `rtk bypass`, `RTK_DISABLED=1`).
 /// - `full`: adds "prefix every command with `rtk`". Required for agents without a command
 ///   hook; those agents always receive `full` regardless of this setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -217,12 +217,21 @@ pub struct TelemetryConfig {
     pub consent_date: Option<String>,
 }
 
+// Struct-level default: a `[limits]` table that names only some keys must not fail the
+// whole config load, which would silently drop every other section with it.
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LimitsConfig {
     /// Max total grep results to show (default: 200)
     pub grep_max_results: usize,
     /// Max matches per file in grep output (default: 25)
     pub grep_max_per_file: usize,
+    /// Max chars kept of each line once grep output is capped (default: 160)
+    pub grep_max_line_len: usize,
+    /// Most characters the agent sees of one command's output (default: 30000, the Claude
+    /// Code Bash tool's own cap). A `git diff` this size or smaller is shown whole, and grep
+    /// output past it is capped even when capping saves less than a third.
+    pub agent_output_max_chars: usize,
     /// Max staged/modified files shown in git status (default: 15)
     pub status_max_files: usize,
     /// Max untracked files shown in git status (default: 10)
@@ -236,6 +245,8 @@ impl Default for LimitsConfig {
         Self {
             grep_max_results: 200,
             grep_max_per_file: 25,
+            grep_max_line_len: 160,
+            agent_output_max_chars: 30_000,
             status_max_files: 15,
             status_max_untracked: 10,
             passthrough_max_chars: 2000,
@@ -533,6 +544,18 @@ pub fn show_config() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_partial_limits_table_keeps_the_rest_of_the_config() {
+        // A `[limits]` written before a key existed must not fail the load, which would
+        // silently drop `[hooks]` and every other section with it.
+        let toml = "[hooks]\nexclude_commands = [\"git\"]\n\n[limits]\ngrep_max_results = 50\n";
+        let config: Config = toml::from_str(toml).expect("valid toml");
+        assert_eq!(config.hooks.exclude_commands, vec!["git"]);
+        assert_eq!(config.limits.grep_max_results, 50);
+        assert_eq!(config.limits.grep_max_line_len, 160);
+        assert_eq!(config.limits.grep_max_per_file, 25);
+    }
 
     #[test]
     fn test_hooks_config_deserialize() {

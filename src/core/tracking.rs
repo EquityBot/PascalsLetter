@@ -189,6 +189,38 @@ pub struct HookDecisionRecord {
 }
 
 /// Aggregated statistics across all recorded commands.
+#[derive(Debug)]
+pub struct AttributionRow {
+    pub name: String,
+    pub calls: i64,
+    pub tokens_in: i64,
+    pub tokens_out: i64,
+}
+
+impl AttributionRow {
+    pub fn saved(&self) -> i64 {
+        self.tokens_in - self.tokens_out
+    }
+}
+
+/// Separator for the composite `kind = "pipeline-slice"` attribution name:
+/// U+001F cannot appear in a pipeline name typed in a TOML file, so joining
+/// pipeline and subject with it stays unambiguous.
+pub const PIPELINE_SLICE_SEP: char = '\u{1f}';
+
+#[cfg(feature = "engine")]
+/// `"{pipeline}\u{1f}{subject}"` — one attribution row per pipeline per
+/// slice of tool output (shell, read, search, web, ...).
+pub fn pipeline_slice_key(pipeline: &str, subject: &str) -> String {
+    format!("{pipeline}{PIPELINE_SLICE_SEP}{subject}")
+}
+
+/// Split a `pipeline-slice` row name back into (pipeline, subject); `None`
+/// for a name that never came from [`pipeline_slice_key`].
+pub fn split_pipeline_slice(name: &str) -> Option<(&str, &str)> {
+    name.split_once(PIPELINE_SLICE_SEP)
+}
+
 ///
 /// Provides overall metrics and breakdowns by command and by day.
 /// Returned by [`Tracker::get_summary`].
@@ -204,14 +236,16 @@ pub struct GainSummary {
     pub total_saved: usize,
     /// Average savings percentage across all commands
     pub avg_savings_pct: f64,
-    /// Total execution time across all commands (milliseconds)
+    /// Total execution time of the timed commands (milliseconds); see [`DayStats::timed_commands`]
     pub total_time_ms: u64,
-    /// Average execution time per command (milliseconds)
+    /// Average execution time per timed command (milliseconds)
     pub avg_time_ms: u64,
     /// Top 10 commands by tokens saved: (cmd, count, saved, weighted_rate, avg_time_ms)
     pub by_command: Vec<(String, usize, usize, f64, u64)>,
     /// Last 30 days of activity: (date, saved_tokens)
     pub by_day: Vec<(String, usize)>,
+    /// Rows whose input was over [`HEADLINE_INPUT_CAP_TOKENS`], counted at the cap
+    pub oversized_capped: usize,
 }
 
 /// Daily statistics for token savings and execution metrics.
@@ -246,10 +280,16 @@ pub struct DayStats {
     pub saved_tokens: usize,
     /// Savings percentage for this day
     pub savings_pct: f64,
-    /// Total execution time for this day (milliseconds)
+    /// Total execution time of this day's timed commands (milliseconds)
     pub total_time_ms: u64,
-    /// Average execution time per command (milliseconds)
+    /// Average execution time per timed command (milliseconds)
     pub avg_time_ms: u64,
+    /// Commands whose execution time counts toward `total_time_ms`: those with captured
+    /// input. A zero-input row (passthrough, fallback) filtered nothing, and its duration is
+    /// the wrapped process's lifetime — a whole interactive TUI session for `rtk claude`
+    /// (#4003) — so it would swamp the aggregate. Not exported: CSV/JSON keep their schema.
+    #[serde(skip)]
+    pub timed_commands: usize,
 }
 
 /// Weekly statistics for token savings and execution metrics.
@@ -272,10 +312,13 @@ pub struct WeekStats {
     pub saved_tokens: usize,
     /// Savings percentage for this week
     pub savings_pct: f64,
-    /// Total execution time for this week (milliseconds)
+    /// Total execution time of this week's timed commands (milliseconds)
     pub total_time_ms: u64,
-    /// Average execution time per command (milliseconds)
+    /// Average execution time per timed command (milliseconds)
     pub avg_time_ms: u64,
+    /// Commands whose execution time counts toward `total_time_ms`; see [`DayStats::timed_commands`]
+    #[serde(skip)]
+    pub timed_commands: usize,
 }
 
 /// Monthly statistics for token savings and execution metrics.
@@ -295,10 +338,13 @@ pub struct MonthStats {
     pub saved_tokens: usize,
     /// Savings percentage for this month
     pub savings_pct: f64,
-    /// Total execution time for this month (milliseconds)
+    /// Total execution time of this month's timed commands (milliseconds)
     pub total_time_ms: u64,
-    /// Average execution time per command (milliseconds)
+    /// Average execution time per timed command (milliseconds)
     pub avg_time_ms: u64,
+    /// Commands whose execution time counts toward `total_time_ms`; see [`DayStats::timed_commands`]
+    #[serde(skip)]
+    pub timed_commands: usize,
 }
 
 /// Type alias for command statistics tuple: (command, count, saved_tokens, weighted_savings_rate, avg_time_ms)
@@ -313,6 +359,15 @@ pub struct MonthStats {
 /// unsigned, is clamped to 0.
 type CommandStats = (String, usize, usize, f64, u64);
 
+/// Mean execution time over the timed commands only (see [`DayStats::timed_commands`]).
+pub fn average_time_ms(total_time_ms: u64, timed_commands: usize) -> u64 {
+    if timed_commands > 0 {
+        total_time_ms / timed_commands as u64
+    } else {
+        0
+    }
+}
+
 /// Current tracking-DB schema version, stored in the SQLite `user_version` pragma.
 ///
 /// `Tracker::new()` is on the hot path (every `rtk <cmd>` invocation and every
@@ -320,7 +375,28 @@ type CommandStats = (String, usize, usize, f64, u64);
 /// call. Bump this whenever `run_schema_migrations` gains a new statement; a stale
 /// `user_version` triggers exactly one re-run of the full migration sequence, then
 /// the pragma is updated so subsequent opens skip straight past it.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+
+/// Ceiling on what a row counts for in every savings aggregate. 7,500 DB tokens is
+/// exactly 30,000 chars at the bytes/4 estimate — Claude Code's default Bash output
+/// limit (BASH_MAX_OUTPUT_LENGTH), i.e. the most the agent ingests of either the raw
+/// or the filtered output. Leaving oversized rows out of the headline but in the
+/// per-command table made that table claim five times the headline's savings; each
+/// row now counts as [`seen_by_agent`] everywhere, and the rows the cap touched are
+/// counted in `GainSummary::oversized_capped`.
+pub const HEADLINE_INPUT_CAP_TOKENS: usize = 7_500;
+
+/// A row's input and output tokens as the agent would have seen them.
+fn seen_by_agent(input: usize, output: usize) -> (usize, usize) {
+    (
+        input.min(HEADLINE_INPUT_CAP_TOKENS),
+        output.min(HEADLINE_INPUT_CAP_TOKENS),
+    )
+}
+
+/// [`seen_by_agent`] in SQL, for the grouped queries: `?3` is bound to the cap.
+const SEEN_INPUT_SQL: &str = "MIN(input_tokens, ?3)";
+const SEEN_SAVED_SQL: &str = "(MIN(input_tokens, ?3) - MIN(output_tokens, ?3))";
 
 /// Create all tables/indexes, run column migrations, and stamp `user_version` to
 /// `SCHEMA_VERSION` for the on-disk tracker DB.
@@ -416,6 +492,28 @@ fn run_schema_migrations(conn: &Connection) -> Result<()> {
         [],
     )?;
 
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS classifier_cache (
+            key TEXT PRIMARY KEY,
+            answer TEXT NOT NULL,
+            ts TEXT NOT NULL
+        )",
+        [],
+    )?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS engine_attribution (
+            day TEXT NOT NULL,
+            site TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            name TEXT NOT NULL,
+            calls INTEGER NOT NULL DEFAULT 0,
+            tokens_in INTEGER NOT NULL DEFAULT 0,
+            tokens_out INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (day, site, kind, name)
+        )",
+        [],
+    )?;
+
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
 
     Ok(())
@@ -482,6 +580,7 @@ const SUBCOMMAND_ROUTERS: &[&str] = &[
     "kubectl",
     "mvn",
     "next",
+    "ng",
     "npm",
     "php",
     "pip",
@@ -729,6 +828,95 @@ impl Tracker {
         Ok(())
     }
 
+    #[cfg(feature = "engine")]
+    /// Memoized classifier answer for `key`, if one was recorded.
+    pub fn classifier_cache_get(&self, key: &str) -> Result<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT answer FROM classifier_cache WHERE key = ?1")?;
+        let mut rows = stmt.query(params![key])?;
+        Ok(match rows.next()? {
+            Some(row) => Some(row.get(0)?),
+            None => None,
+        })
+    }
+
+    #[cfg(feature = "engine")]
+    /// Record a classifier answer; repeated content classifies once.
+    pub fn classifier_cache_put(&self, key: &str, answer: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO classifier_cache (key, answer, ts) VALUES (?1, ?2, ?3)",
+            params![key, answer, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    #[cfg(feature = "engine")]
+    pub fn record_attribution(
+        &self,
+        site: &str,
+        kind: &str,
+        name: &str,
+        tokens_in: usize,
+        tokens_out: usize,
+    ) -> Result<()> {
+        let day = Utc::now().format("%Y-%m-%d").to_string();
+        self.conn
+            .execute(
+                "INSERT INTO engine_attribution (day, site, kind, name, calls, tokens_in, tokens_out)
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)
+                 ON CONFLICT(day, site, kind, name) DO UPDATE SET
+                   calls = calls + 1,
+                   tokens_in = tokens_in + excluded.tokens_in,
+                   tokens_out = tokens_out + excluded.tokens_out",
+                params![day, site, kind, name, tokens_in as i64, tokens_out as i64],
+            )
+            .inspect_err(|e| warn_if_missing_table("record_attribution", e))?;
+        Ok(())
+    }
+
+    pub fn attribution(&self, kind: &str, days: u32) -> Result<Vec<AttributionRow>> {
+        self.attribution_query(None, kind, days)
+    }
+
+    pub fn attribution_site(
+        &self,
+        site: &str,
+        kind: &str,
+        days: u32,
+    ) -> Result<Vec<AttributionRow>> {
+        self.attribution_query(Some(site), kind, days)
+    }
+
+    fn attribution_query(
+        &self,
+        site: Option<&str>,
+        kind: &str,
+        days: u32,
+    ) -> Result<Vec<AttributionRow>> {
+        let cutoff = (Utc::now() - chrono::Duration::days(days as i64))
+            .format("%Y-%m-%d")
+            .to_string();
+        let mut stmt = self.conn.prepare(
+            "SELECT name, SUM(calls), SUM(tokens_in), SUM(tokens_out)
+             FROM engine_attribution
+             WHERE kind = ?1 AND day >= ?2 AND (?3 IS NULL OR site = ?3)
+             GROUP BY site, name
+             ORDER BY SUM(tokens_in) - SUM(tokens_out) DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![kind, cutoff, site], |row| {
+                Ok(AttributionRow {
+                    name: row.get(0)?,
+                    calls: row.get(1)?,
+                    tokens_in: row.get(2)?,
+                    tokens_out: row.get(3)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     fn cleanup_old(&self) -> Result<()> {
         let cutoff = Utc::now() - chrono::Duration::days(DEFAULT_HISTORY_DAYS);
         self.conn.execute(
@@ -743,6 +931,11 @@ impl Tracker {
             "DELETE FROM hook_decisions WHERE timestamp < ?1",
             params![cutoff.to_rfc3339()],
         )?;
+        let cutoff_day = cutoff.format("%Y-%m-%d").to_string();
+        self.conn.execute(
+            "DELETE FROM engine_attribution WHERE day < ?1",
+            params![cutoff_day],
+        )?;
         Ok(())
     }
 
@@ -754,6 +947,8 @@ impl Tracker {
                  DELETE FROM commands;
                  DELETE FROM parse_failures;
                  DELETE FROM hook_decisions;
+                 DELETE FROM engine_attribution;
+                 DELETE FROM classifier_cache;
                  COMMIT;",
             )
             .context("Failed to reset tracking database")?;
@@ -1008,11 +1203,12 @@ impl Tracker {
         let mut total_commands = 0usize;
         let mut total_input = 0usize;
         let mut total_output = 0usize;
-        let mut total_saved = 0usize;
         let mut total_time_ms = 0u64;
+        let mut oversized_capped = 0usize;
+        let mut timed_commands = 0usize;
 
         let mut stmt = self.conn.prepare(
-            "SELECT input_tokens, output_tokens, saved_tokens, exec_time_ms
+            "SELECT input_tokens, output_tokens, exec_time_ms
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)", // added: project filter
         )?;
@@ -1022,21 +1218,29 @@ impl Tracker {
             Ok((
                 row.get::<_, i64>(0)? as usize,
                 row.get::<_, i64>(1)? as usize,
-                // saved_tokens may be negative (a command that worsened output); clamp
-                // to 0 for the unsigned aggregate so it never wraps to a huge usize.
-                row.get::<_, i64>(2)?.max(0) as usize,
-                row.get::<_, i64>(3)? as u64,
+                row.get::<_, i64>(2)? as u64,
             ))
         })?;
 
+        // Net of the commands rtk made worse, so a filter that inflates output costs the
+        // headline; only the total is clamped, so it never wraps to a huge usize.
+        let mut net_saved = 0i64;
         for row in rows {
-            let (input, output, saved, time_ms) = row?;
+            let (input, output, time_ms) = row?;
+            if input.max(output) > HEADLINE_INPUT_CAP_TOKENS {
+                oversized_capped += 1;
+            }
+            let (input, output) = seen_by_agent(input, output);
             total_commands += 1;
             total_input += input;
             total_output += output;
-            total_saved += saved;
-            total_time_ms += time_ms;
+            net_saved += input as i64 - output as i64;
+            if input > 0 {
+                total_time_ms += time_ms;
+                timed_commands += 1;
+            }
         }
+        let total_saved = net_saved.max(0) as usize;
 
         let avg_savings_pct = if total_input > 0 {
             (total_saved as f64 / total_input as f64) * 100.0
@@ -1044,11 +1248,7 @@ impl Tracker {
             0.0
         };
 
-        let avg_time_ms = if total_commands > 0 {
-            total_time_ms / total_commands as u64
-        } else {
-            0
-        };
+        let avg_time_ms = average_time_ms(total_time_ms, timed_commands);
 
         let by_command = self.get_by_command(project_path)?; // added: pass project filter
         let by_day = self.get_by_day(project_path)?; // added: pass project filter
@@ -1063,6 +1263,7 @@ impl Tracker {
             avg_time_ms,
             by_command,
             by_day,
+            oversized_capped,
         })
     }
 
@@ -1071,18 +1272,21 @@ impl Tracker {
         project_path: Option<&str>, // added
     ) -> Result<Vec<CommandStats>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
-        let mut stmt = self.conn.prepare(
-            "SELECT rtk_cmd, COUNT(*), SUM(saved_tokens),
-                    CASE WHEN SUM(input_tokens) > 0 THEN SUM(saved_tokens) * 100.0 / SUM(input_tokens) ELSE 0.0 END,
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT rtk_cmd, COUNT(*), SUM({saved}),
+                    CASE WHEN SUM({input}) > 0 THEN SUM({saved}) * 100.0 / SUM({input}) ELSE 0.0 END,
                     AVG(exec_time_ms)
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY rtk_cmd
-             ORDER BY SUM(saved_tokens) DESC
-             LIMIT 10", // added: project filter in WHERE
-        )?;
+             ORDER BY SUM({saved}) DESC
+             LIMIT 10",
+            saved = SEEN_SAVED_SQL,
+            input = SEEN_INPUT_SQL,
+        ))?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+        let cap = HEADLINE_INPUT_CAP_TOKENS as i64;
+        let rows = stmt.query_map(params![project_exact, project_glob, cap], |row| {
             // added: params
             Ok((
                 row.get::<_, String>(0)?,
@@ -1102,16 +1306,17 @@ impl Tracker {
         project_path: Option<&str>, // added
     ) -> Result<Vec<(String, usize)>> {
         let (project_exact, project_glob) = project_filter_params(project_path); // added
-        let mut stmt = self.conn.prepare(
-            "SELECT DATE(timestamp), SUM(saved_tokens)
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT DATE(timestamp), SUM({SEEN_SAVED_SQL})
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY DATE(timestamp)
              ORDER BY DATE(timestamp) DESC
-             LIMIT 30", // added: project filter in WHERE
-        )?;
+             LIMIT 30"
+        ))?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
+        let cap = HEADLINE_INPUT_CAP_TOKENS as i64;
+        let rows = stmt.query_map(params![project_exact, project_glob, cap], |row| {
             // added: params
             // SUM(saved_tokens) per day: clamp a net-negative day to 0 (unsigned field).
             Ok((
@@ -1154,44 +1359,49 @@ impl Tracker {
             "SELECT
                 DATE(timestamp) as date,
                 COUNT(*) as commands,
-                SUM(input_tokens) as input,
-                SUM(output_tokens) as output,
-                SUM(saved_tokens) as saved,
-                SUM(exec_time_ms) as total_time
+                SUM(MIN(input_tokens, ?3)) as input,
+                SUM(MIN(output_tokens, ?3)) as output,
+                SUM(MIN(input_tokens, ?3) - MIN(output_tokens, ?3)) as saved,
+                SUM(CASE WHEN input_tokens > 0 THEN exec_time_ms ELSE 0 END) as total_time,
+                SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) as timed_commands
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY DATE(timestamp)
              ORDER BY DATE(timestamp) DESC", // added: project filter
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
-            // added: params
-            let input = row.get::<_, i64>(2)? as usize;
-            let saved = row.get::<_, i64>(4)?.max(0) as usize; // clamp net-negative group
-            let commands = row.get::<_, i64>(1)? as usize;
-            let total_time = row.get::<_, i64>(5)? as u64;
-            let savings_pct = if input > 0 {
-                (saved as f64 / input as f64) * 100.0
-            } else {
-                0.0
-            };
-            let avg_time_ms = if commands > 0 {
-                total_time / commands as u64
-            } else {
-                0
-            };
+        let rows = stmt.query_map(
+            params![
+                project_exact,
+                project_glob,
+                HEADLINE_INPUT_CAP_TOKENS as i64
+            ],
+            |row| {
+                // added: params
+                let input = row.get::<_, i64>(2)? as usize;
+                let saved = row.get::<_, i64>(4)?.max(0) as usize; // clamp net-negative group
+                let commands = row.get::<_, i64>(1)? as usize;
+                let total_time = row.get::<_, i64>(5)? as u64;
+                let timed_commands = row.get::<_, i64>(6)? as usize;
+                let savings_pct = if input > 0 {
+                    (saved as f64 / input as f64) * 100.0
+                } else {
+                    0.0
+                };
 
-            Ok(DayStats {
-                date: row.get(0)?,
-                commands,
-                input_tokens: input,
-                output_tokens: row.get::<_, i64>(3)? as usize,
-                saved_tokens: saved,
-                savings_pct,
-                total_time_ms: total_time,
-                avg_time_ms,
-            })
-        })?;
+                Ok(DayStats {
+                    date: row.get(0)?,
+                    commands,
+                    input_tokens: input,
+                    output_tokens: row.get::<_, i64>(3)? as usize,
+                    saved_tokens: saved,
+                    savings_pct,
+                    total_time_ms: total_time,
+                    avg_time_ms: average_time_ms(total_time, timed_commands),
+                    timed_commands,
+                })
+            },
+        )?;
 
         let mut result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
         result.reverse();
@@ -1228,45 +1438,50 @@ impl Tracker {
                 DATE(timestamp, 'weekday 0', '-6 days') as week_start,
                 DATE(timestamp, 'weekday 0') as week_end,
                 COUNT(*) as commands,
-                SUM(input_tokens) as input,
-                SUM(output_tokens) as output,
-                SUM(saved_tokens) as saved,
-                SUM(exec_time_ms) as total_time
+                SUM(MIN(input_tokens, ?3)) as input,
+                SUM(MIN(output_tokens, ?3)) as output,
+                SUM(MIN(input_tokens, ?3) - MIN(output_tokens, ?3)) as saved,
+                SUM(CASE WHEN input_tokens > 0 THEN exec_time_ms ELSE 0 END) as total_time,
+                SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) as timed_commands
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY week_start
              ORDER BY week_start DESC", // added: project filter
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
-            // added: params
-            let input = row.get::<_, i64>(3)? as usize;
-            let saved = row.get::<_, i64>(5)?.max(0) as usize; // clamp net-negative group
-            let commands = row.get::<_, i64>(2)? as usize;
-            let total_time = row.get::<_, i64>(6)? as u64;
-            let savings_pct = if input > 0 {
-                (saved as f64 / input as f64) * 100.0
-            } else {
-                0.0
-            };
-            let avg_time_ms = if commands > 0 {
-                total_time / commands as u64
-            } else {
-                0
-            };
+        let rows = stmt.query_map(
+            params![
+                project_exact,
+                project_glob,
+                HEADLINE_INPUT_CAP_TOKENS as i64
+            ],
+            |row| {
+                // added: params
+                let input = row.get::<_, i64>(3)? as usize;
+                let saved = row.get::<_, i64>(5)?.max(0) as usize; // clamp net-negative group
+                let commands = row.get::<_, i64>(2)? as usize;
+                let total_time = row.get::<_, i64>(6)? as u64;
+                let timed_commands = row.get::<_, i64>(7)? as usize;
+                let savings_pct = if input > 0 {
+                    (saved as f64 / input as f64) * 100.0
+                } else {
+                    0.0
+                };
 
-            Ok(WeekStats {
-                week_start: row.get(0)?,
-                week_end: row.get(1)?,
-                commands,
-                input_tokens: input,
-                output_tokens: row.get::<_, i64>(4)? as usize,
-                saved_tokens: saved,
-                savings_pct,
-                total_time_ms: total_time,
-                avg_time_ms,
-            })
-        })?;
+                Ok(WeekStats {
+                    week_start: row.get(0)?,
+                    week_end: row.get(1)?,
+                    commands,
+                    input_tokens: input,
+                    output_tokens: row.get::<_, i64>(4)? as usize,
+                    saved_tokens: saved,
+                    savings_pct,
+                    total_time_ms: total_time,
+                    avg_time_ms: average_time_ms(total_time, timed_commands),
+                    timed_commands,
+                })
+            },
+        )?;
 
         let mut result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
         result.reverse();
@@ -1302,44 +1517,49 @@ impl Tracker {
             "SELECT
                 strftime('%Y-%m', timestamp) as month,
                 COUNT(*) as commands,
-                SUM(input_tokens) as input,
-                SUM(output_tokens) as output,
-                SUM(saved_tokens) as saved,
-                SUM(exec_time_ms) as total_time
+                SUM(MIN(input_tokens, ?3)) as input,
+                SUM(MIN(output_tokens, ?3)) as output,
+                SUM(MIN(input_tokens, ?3) - MIN(output_tokens, ?3)) as saved,
+                SUM(CASE WHEN input_tokens > 0 THEN exec_time_ms ELSE 0 END) as total_time,
+                SUM(CASE WHEN input_tokens > 0 THEN 1 ELSE 0 END) as timed_commands
              FROM commands
              WHERE (?1 IS NULL OR project_path = ?1 OR project_path GLOB ?2)
              GROUP BY month
              ORDER BY month DESC", // added: project filter
         )?;
 
-        let rows = stmt.query_map(params![project_exact, project_glob], |row| {
-            // added: params
-            let input = row.get::<_, i64>(2)? as usize;
-            let saved = row.get::<_, i64>(4)?.max(0) as usize; // clamp net-negative group
-            let commands = row.get::<_, i64>(1)? as usize;
-            let total_time = row.get::<_, i64>(5)? as u64;
-            let savings_pct = if input > 0 {
-                (saved as f64 / input as f64) * 100.0
-            } else {
-                0.0
-            };
-            let avg_time_ms = if commands > 0 {
-                total_time / commands as u64
-            } else {
-                0
-            };
+        let rows = stmt.query_map(
+            params![
+                project_exact,
+                project_glob,
+                HEADLINE_INPUT_CAP_TOKENS as i64
+            ],
+            |row| {
+                // added: params
+                let input = row.get::<_, i64>(2)? as usize;
+                let saved = row.get::<_, i64>(4)?.max(0) as usize; // clamp net-negative group
+                let commands = row.get::<_, i64>(1)? as usize;
+                let total_time = row.get::<_, i64>(5)? as u64;
+                let timed_commands = row.get::<_, i64>(6)? as usize;
+                let savings_pct = if input > 0 {
+                    (saved as f64 / input as f64) * 100.0
+                } else {
+                    0.0
+                };
 
-            Ok(MonthStats {
-                month: row.get(0)?,
-                commands,
-                input_tokens: input,
-                output_tokens: row.get::<_, i64>(3)? as usize,
-                saved_tokens: saved,
-                savings_pct,
-                total_time_ms: total_time,
-                avg_time_ms,
-            })
-        })?;
+                Ok(MonthStats {
+                    month: row.get(0)?,
+                    commands,
+                    input_tokens: input,
+                    output_tokens: row.get::<_, i64>(3)? as usize,
+                    saved_tokens: saved,
+                    savings_pct,
+                    total_time_ms: total_time,
+                    avg_time_ms: average_time_ms(total_time, timed_commands),
+                    timed_commands,
+                })
+            },
+        )?;
 
         let mut result: Vec<_> = rows.collect::<Result<Vec<_>, _>>()?;
         result.reverse();
@@ -1885,35 +2105,7 @@ pub fn record_parse_failure_silent(raw_command: &str, error_message: &str, succe
     }
 }
 
-/// Estimate token count from text using ~4 chars = 1 token heuristic.
-///
-/// This is a fast approximation suitable for tracking purposes.
-/// For precise counts, integrate with your LLM's tokenizer API.
-///
-/// # Formula
-///
-/// `tokens = ceil(chars / 4)`
-///
-/// # Examples
-///
-/// ```
-/// use rtk::tracking::estimate_tokens;
-///
-/// assert_eq!(estimate_tokens(""), 0);
-/// assert_eq!(estimate_tokens("abcd"), 1);  // 4 chars = 1 token
-/// assert_eq!(estimate_tokens("abcde"), 2); // 5 chars = ceil(1.25) = 2
-/// assert_eq!(estimate_tokens("hello world"), 3); // 11 chars = ceil(2.75) = 3
-/// ```
-pub fn estimate_tokens(text: &str) -> usize {
-    estimate_tokens_from_len(text.len())
-}
-
-/// Token estimate from a raw byte length, for callers that hold a byte count rather
-/// than a `&str` (e.g. non-UTF-8 captured output). Same ~4-chars-per-token model as
-/// [`estimate_tokens`].
-pub fn estimate_tokens_from_len(len: usize) -> usize {
-    (len as f64 / 4.0).ceil() as usize
-}
+pub use rtk_text::{estimate_tokens, estimate_tokens_from_len};
 
 /// Helper struct for timing command execution
 /// Helper for timing command execution and tracking results.
@@ -2004,9 +2196,20 @@ impl TimedExecution {
     /// transcoded (inflated) length rather than what the wrapped command emitted,
     /// overstating the reduction.
     pub fn track_bytes(&self, original_cmd: &str, rtk_cmd: &str, input_len: usize, output: &str) {
+        self.track_byte_counts(original_cmd, rtk_cmd, input_len, output.len());
+    }
+
+    /// Record streamed or binary output without retaining or decoding it for accounting.
+    pub fn track_byte_counts(
+        &self,
+        original_cmd: &str,
+        rtk_cmd: &str,
+        input_len: usize,
+        output_len: usize,
+    ) {
         let elapsed_ms = self.start.elapsed().as_millis() as u64;
         let input_tokens = estimate_tokens_from_len(input_len);
-        let output_tokens = estimate_tokens(output);
+        let output_tokens = estimate_tokens_from_len(output_len);
 
         if let Ok(tracker) = Tracker::new() {
             let _ = tracker.record(
@@ -2023,7 +2226,9 @@ impl TimedExecution {
     ///
     /// For commands that stream output or run interactively where output
     /// cannot be captured. Records execution time but sets tokens to 0
-    /// (does not dilute savings statistics).
+    /// (does not dilute savings statistics). The zero input also keeps the
+    /// row out of the `rtk gain` exec-time aggregates, since its duration is
+    /// the wrapped process's lifetime, not filtering work.
     ///
     /// # Arguments
     ///
@@ -2128,6 +2333,7 @@ mod command_label_tests {
                 "rtk gh issue",
             ),
             ("rtk cargo test --all", "rtk cargo test"),
+            ("rtk ng build app", "rtk ng build"),
             ("rtk docker compose up", "rtk docker compose"),
             // A wrapper script and its bare name are the same tool.
             ("rtk ./gradlew build", "rtk gradlew build"),
@@ -2505,6 +2711,37 @@ mod tests {
     }
 
     // 3. Tracker::record + get_recent — round-trip DB
+    #[cfg(feature = "engine")]
+    #[test]
+    fn test_attribution_upserts_and_aggregates() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        tracker
+            .record_attribution("hook", "method", "cap", 1000, 300)
+            .expect("first write");
+        tracker
+            .record_attribution("hook", "method", "cap", 500, 100)
+            .expect("upsert");
+        tracker
+            .record_attribution("hook", "rule", "builtin tool_result format=term", 1000, 300)
+            .expect("rule row");
+
+        let methods = tracker.attribution("method", 7).expect("query");
+        assert_eq!(methods.len(), 1);
+        assert_eq!(methods[0].name, "cap");
+        assert_eq!(methods[0].calls, 2);
+        assert_eq!(methods[0].tokens_in, 1500);
+        assert_eq!(methods[0].saved(), 1100);
+
+        let rules = tracker.attribution("rule", 7).expect("query");
+        assert_eq!(rules.len(), 1);
+        assert!(
+            tracker
+                .attribution("recovery", 7)
+                .expect("query")
+                .is_empty()
+        );
+    }
+
     #[test]
     fn test_tracker_record_and_recent() {
         // In-memory: isolated per-test DB, immune to the shared on-disk DB's
@@ -2528,6 +2765,65 @@ mod tests {
 
         assert_eq!(test_record.saved_tokens, 80);
         assert_eq!(test_record.savings_pct, 80.0);
+    }
+
+    /// Every aggregate counts a row as the agent would have seen it: raw and filtered
+    /// output both cut at the cap. So the headline is the sum of the per-command rows,
+    /// period tables agree with it, and a command that grew its output costs the total.
+    #[test]
+    fn a_row_capped_on_either_side_counts_once_as_capped() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        let over = HEADLINE_INPUT_CAP_TOKENS + 1;
+        for (input, output) in [(over, 10), (10, over), (over, over), (10, 10)] {
+            tracker
+                .record("x", "rtk x", input, output, 1)
+                .expect("Failed to record row");
+        }
+        let summary = tracker.get_summary().expect("Failed to get summary");
+        assert_eq!(summary.oversized_capped, 3);
+    }
+
+    #[test]
+    fn oversized_rows_count_at_the_cap_in_every_table() {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+
+        tracker
+            .record("ls", "rtk ls", 1_000, 500, 5)
+            .expect("Failed to record normal row");
+        tracker
+            .record("cat huge.log", "rtk cat huge.log", 1_000_000, 100, 5)
+            .expect("Failed to record oversized row");
+        tracker
+            .record("wc a", "rtk wc a", 100, 150, 5)
+            .expect("Failed to record inflated row");
+
+        let cap = HEADLINE_INPUT_CAP_TOKENS;
+        let summary = tracker.get_summary().expect("Failed to get summary");
+        assert_eq!(summary.oversized_capped, 1);
+        assert_eq!(summary.total_commands, 3);
+        assert_eq!(summary.total_input, 1_000 + cap + 100);
+        assert_eq!(summary.total_saved, 500 + (cap - 100) - 50);
+
+        let by_command: i64 = summary
+            .by_command
+            .iter()
+            .map(|(_, _, saved, _, _)| *saved as i64)
+            .sum();
+        // The inflated group clamps to 0 in its own row, so the table sums 50 higher.
+        assert_eq!(by_command, summary.total_saved as i64 + 50);
+        let huge = summary
+            .by_command
+            .iter()
+            .find(|(cmd, ..)| cmd == "rtk cat huge.log")
+            .expect("oversized row stays listed");
+        assert_eq!(huge.2, cap - 100, "listed at the cap, not at 1M tokens");
+
+        let days = tracker
+            .get_all_days_filtered(None)
+            .expect("Failed to get days");
+        assert_eq!(days.len(), 1);
+        assert_eq!(days[0].input_tokens, summary.total_input);
+        assert_eq!(days[0].saved_tokens, summary.total_saved);
     }
 
     // 4. track_passthrough doesn't dilute stats (input=0, output=0)
@@ -3180,7 +3476,7 @@ mod tests {
 
         // Override project_path by inserting directly via conn
         let saved_small = 10_i64; // 100 in - 90 out = 10 saved → 10%
-        let saved_large = 95_000_i64; // 100_000 in - 5_000 out = 95_000 saved → 95%
+        let saved_large = 6_650_i64; // 7_000 in - 350 out = 6_650 saved → 95%, under the cap
         tracker
             .conn
             .execute(
@@ -3201,7 +3497,7 @@ mod tests {
                 rusqlite::params![
                     chrono::Utc::now().to_rfc3339(),
                     cmd_name, cmd_name, project,
-                    100_000_i64, 5_000_i64, saved_large, 95.0_f64, 10_i64
+                    7_000_i64, 350_i64, saved_large, 95.0_f64, 10_i64
                 ],
             )
             .expect("Failed to insert large invocation");
@@ -3217,7 +3513,7 @@ mod tests {
 
         let (_name, _count, _saved, rate, _time) = entry;
 
-        // Weighted rate = (10 + 95_000) / (100 + 100_000) * 100.0 ≈ 94.9%
+        // Weighted rate = (10 + 6_650) / (100 + 7_000) * 100.0 ≈ 93.8%
         // Unweighted avg would be (10.0 + 95.0) / 2 = 52.5%
         // The gap proves the fix works.
         assert!(
@@ -3229,15 +3525,15 @@ mod tests {
 
     // 15. The weighted rate tracks SUM(saved_tokens), not the mean of per-call percentages
     //
-    // A long-tailed pair under one rtk_cmd: a 1M-token call saving 90% and a 100-token
-    // call saving 10%. The mean of the two percentages is 50%; the weighted rate is
-    // ~89.99% and is the figure consistent with the Saved column in the same row.
+    // A long-tailed pair under one rtk_cmd: a 7,000-token call saving 90% and a 100-token
+    // call saving 10% (both under the agent cap). The mean of the two percentages is 50%;
+    // the weighted rate is ~88.9% and is the figure consistent with the Saved column in the same row.
     #[test]
     fn test_weighted_rate_via_get_by_command() {
         let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
 
         tracker
-            .record("grep huge", "rtk grep", 1_000_000, 100_000, 50)
+            .record("grep huge", "rtk grep", 7_000, 700, 50)
             .expect("record huge");
         tracker
             .record("grep tiny", "rtk grep", 100, 90, 5)
@@ -3251,8 +3547,8 @@ mod tests {
             .expect("rtk grep row not found");
 
         assert_eq!(*count, 2);
-        assert_eq!(*saved, 900_010);
-        let expected = 900_010.0 / 1_000_100.0 * 100.0;
+        assert_eq!(*saved, 6_310);
+        let expected = 6_310.0 / 7_100.0 * 100.0;
         assert!(
             (pct - expected).abs() < 0.01,
             "expected weighted rate ~{expected:.2}, got {pct:.2}"
@@ -3296,15 +3592,15 @@ mod tests {
     fn test_by_command_zero_input_has_zero_savings_percentage() {
         let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
         tracker
-            .record("interactive command", "rtk proxy", 0, 0, 5)
+            .record("interactive command", "rtk bypass", 0, 0, 5)
             .expect("Failed to record passthrough command");
 
         let summary = tracker.get_summary().expect("Failed to get summary");
         let (_, _, _, savings_pct, _) = summary
             .by_command
             .iter()
-            .find(|(command, _, _, _, _)| command == "rtk proxy")
-            .expect("rtk proxy stats not found");
+            .find(|(command, _, _, _, _)| command == "rtk bypass")
+            .expect("rtk bypass stats not found");
 
         assert_eq!(*savings_pct, 0.0);
     }
@@ -3319,7 +3615,7 @@ mod tests {
     // `rtk grep`: 25% on one call, then a call with no input that still printed 10 tokens.
     // Every row counts, as in `get_by_command`: (250 - 10) / 1_000 = 24%, listed at 24.
     // `rtk read`: emits more than it saves, -50%. Listed: it is the filter to fix first.
-    // `rtk proxy`: never had any input. Nothing to say about its filter, not listed.
+    // `rtk bypass`: never had any input. Nothing to say about its filter, not listed.
     #[test]
     fn test_low_savings_commands_matches_gain_weighted_rate() {
         let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
@@ -3341,7 +3637,7 @@ mod tests {
             .record("read big.json", "rtk read", 100, 150, 5)
             .expect("record regressing call");
         tracker
-            .record("interactive", "rtk proxy", 0, 0, 5)
+            .record("interactive", "rtk bypass", 0, 0, 5)
             .expect("record zero-input call");
 
         let low = tracker
@@ -3379,7 +3675,7 @@ mod tests {
     // command name counts once, and a command that never had any input is not counted.
     //
     // Same rows as test 18: `rtk ls -R` ≈ 94.6% (19% if the inner aggregate were
-    // AVG(savings_pct)), `rtk grep` 24%, `rtk read` -50%, `rtk proxy` skipped.
+    // AVG(savings_pct)), `rtk grep` 24%, `rtk read` -50%, `rtk bypass` skipped.
     #[test]
     fn test_avg_savings_per_command_inner_rate_is_weighted() {
         let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
@@ -3401,7 +3697,7 @@ mod tests {
             .record("read big.json", "rtk read", 100, 150, 5)
             .expect("record regressing call");
         tracker
-            .record("interactive", "rtk proxy", 0, 0, 5)
+            .record("interactive", "rtk bypass", 0, 0, 5)
             .expect("record zero-input call");
 
         let avg = tracker
@@ -3414,5 +3710,71 @@ mod tests {
             "expected ({ls_rate:.1} + 24 - 50) / 3 = {expected:.1}%, got {avg:.1}% \
              (an unweighted inner AVG(savings_pct) would give (19 + 12.5 - 50) / 3 = -6.2%)"
         );
+    }
+
+    /// Three filtered commands (100 + 200 + 300 ms) plus one `rtk claude` TUI session
+    /// left open for 11 hours, recorded through the passthrough path with no input (#4003).
+    fn tracker_with_interactive_session() -> Tracker {
+        let tracker = Tracker::new_in_memory().expect("Failed to create tracker");
+        for (ms, input) in [(100, 1_000), (200, 2_000), (300, 3_000)] {
+            tracker
+                .record("git status", "rtk git status", input, input / 4, ms)
+                .expect("record filtered command");
+        }
+        tracker
+            .record("claude", "rtk fallback: claude", 0, 0, 11 * 3_600_000)
+            .expect("record interactive session");
+        tracker
+    }
+
+    // 20. A zero-input row did no filtering, so its wall-clock lifetime must not reach the
+    // exec-time aggregate or its average. Commands and savings still count every row.
+    #[test]
+    fn test_summary_exec_time_excludes_zero_input_rows() {
+        let summary = tracker_with_interactive_session()
+            .get_summary()
+            .expect("Failed to get summary");
+
+        assert_eq!(summary.total_time_ms, 600);
+        assert_eq!(summary.avg_time_ms, 200);
+        assert_eq!(summary.total_commands, 4);
+        assert_eq!(summary.total_input, 6_000);
+        assert_eq!(summary.total_saved, 4_500);
+    }
+
+    // 21. The daily / weekly / monthly breakdowns (text, JSON and CSV) apply the same rule.
+    #[test]
+    fn test_period_exec_time_excludes_zero_input_rows() {
+        let tracker = tracker_with_interactive_session();
+
+        let days = tracker.get_all_days().expect("get_all_days");
+        let weeks = tracker.get_by_week().expect("get_by_week");
+        let months = tracker.get_by_month().expect("get_by_month");
+        assert_eq!((days.len(), weeks.len(), months.len()), (1, 1, 1));
+
+        for (period, commands, total_time_ms, avg_time_ms) in [
+            (
+                "day",
+                days[0].commands,
+                days[0].total_time_ms,
+                days[0].avg_time_ms,
+            ),
+            (
+                "week",
+                weeks[0].commands,
+                weeks[0].total_time_ms,
+                weeks[0].avg_time_ms,
+            ),
+            (
+                "month",
+                months[0].commands,
+                months[0].total_time_ms,
+                months[0].avg_time_ms,
+            ),
+        ] {
+            assert_eq!(commands, 4, "{period}: every row still counts as a command");
+            assert_eq!(total_time_ms, 600, "{period}: total exec time");
+            assert_eq!(avg_time_ms, 200, "{period}: avg exec time");
+        }
     }
 }

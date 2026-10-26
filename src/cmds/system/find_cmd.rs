@@ -331,6 +331,10 @@ fn run_compress(
 
 /// Entry point from main.rs — dispatches on find's grammar then delegates.
 pub fn run_from_args(args: &[String], verbose: u8) -> Result<i32> {
+    // dispatch() would read a lone `--help` as find's legacy name pattern (#4198).
+    if crate::core::runner::requests_help_args("find", args) {
+        return run_verbatim(args, verbose);
+    }
     match dispatch(args)? {
         Dispatch::Native { parsed, label } => run(
             &label,
@@ -1521,8 +1525,10 @@ mod tests {
     #[test]
     fn run_from_args_propagates_find_exit_status() {
         let argv = ["/definitely/missing/xyz", "-mtime", "+0"];
-        let expected = std::process::Command::new("find")
-            .args(argv)
+        // Match production's PATH resolution: bare Command::new("find") can
+        // select Windows' unrelated System32 FIND.EXE ahead of GNU find.
+        let expected = crate::core::utils::resolved_command("find")
+            .child_args(argv)
             .output()
             .map(|o| o.status.code().unwrap_or(1))
             .unwrap_or(127);

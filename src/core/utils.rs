@@ -11,13 +11,11 @@ use crate::core::user_dirs;
 use crate::core::user_env;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use regex::Regex;
 use serde_json::Value;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::LazyLock;
 
 /// Compute `days` ago from now, clamped instead of panicking on overflow.
 ///
@@ -38,46 +36,13 @@ pub fn days_ago_cutoff(days: u64) -> DateTime<Utc> {
         .unwrap_or(DateTime::<Utc>::MIN_UTC)
 }
 
-/// Truncates a string to `max_len` characters, appending `...` if needed.
-///
-/// # Arguments
-/// * `s` - The string to truncate
-/// * `max_len` - Maximum length before truncation (minimum 3 to include "...")
-///
-/// # Examples
-/// ```
-/// use rtk::utils::truncate;
-/// assert_eq!(truncate("hello world", 8), "hello...");
-/// assert_eq!(truncate("hi", 10), "hi");
-/// ```
-pub fn truncate(s: &str, max_len: usize) -> String {
-    let char_count = s.chars().count();
-    if char_count <= max_len {
-        s.to_string()
-    } else if max_len < 3 {
-        // If max_len is too small, just return "..."
-        "...".to_string()
-    } else {
-        format!("{}...", s.chars().take(max_len - 3).collect::<String>())
-    }
-}
+pub use rtk_text::{strip_ansi, truncate};
 
-/// Strip ANSI escape codes (colors, styles) from a string.
-///
-/// # Arguments
-/// * `text` - Text potentially containing ANSI escape codes
-///
-/// # Examples
-/// ```
-/// use rtk::utils::strip_ansi;
-/// let colored = "\x1b[31mError\x1b[0m";
-/// assert_eq!(strip_ansi(colored), "Error");
-/// ```
-pub fn strip_ansi(text: &str) -> String {
-    static ANSI_RE: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]").unwrap());
-
-    ANSI_RE.replace_all(text, "").to_string()
+pub fn sanitize_for_terminal(text: &str) -> String {
+    strip_ansi(text)
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
+        .collect()
 }
 
 /// Strip one or more leading UTF-8 BOMs (`EF BB BF`, sometimes doubled),
@@ -290,8 +255,13 @@ pub fn create_private_dir(path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Restrict an existing file to owner-only access (0600 on Unix).
+/// Restrict an existing file to owner-only access (0600 on Unix). A path that
+/// is not a regular file (RTK_DB_PATH pointed at a directory) is left alone —
+/// 0600 on a directory makes it untraversable, bricking it for its owner.
 pub fn restrict_file(path: &std::path::Path) {
+    if std::fs::metadata(path).is_ok_and(|m| !m.is_file()) {
+        return;
+    }
     set_owner_only(path, 0o600);
 }
 
@@ -352,6 +322,28 @@ fn set_owner_only(path: &std::path::Path, mode: u32) {
 
 #[cfg(not(unix))]
 fn set_owner_only(_path: &std::path::Path, _mode: u32) {}
+
+#[cfg(all(test, unix))]
+mod owner_only_tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn restrict_file_never_chmods_a_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let before = std::fs::metadata(dir.path())
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        super::restrict_file(dir.path());
+        let after = std::fs::metadata(dir.path())
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(before, after, "directory permissions must be untouched");
+    }
+}
 
 /// Build a Command for Ruby tools, auto-detecting bundle exec.
 /// Uses `bundle exec <tool>` when a Gemfile exists (transitive deps like rake
@@ -517,6 +509,43 @@ pub fn quote_arg_for_child(arg: &str) -> String {
     out
 }
 
+/// Encode one argument for an MSYS/Cygwin child's raw command line.
+///
+/// The MSYS runtime rebuilds argv with its own rules, not MSVC's: an unquoted
+/// argument is globbed, brace-expanded and stripped of `\` and `'` (`#\[x`
+/// reaches grep as `#[x`, `*.rs` as the matching file names, `~` as the home
+/// directory), and inside double quotes `\\` collapses to `\`. So always quote,
+/// and double every backslash rather than only the runs before a quote.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn quote_arg_for_msys(arg: &str) -> String {
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('"');
+    for ch in arg.chars() {
+        if ch == '\\' || ch == '"' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
+}
+
+/// True when the MSYS runtime would change `arg` on std's encoding: it globs,
+/// brace-expands, expands `~` and `@file`, and treats `\`, `'` and `"` as quoting.
+/// Anything else stays on std's path, so `get_args()` readers such as
+/// [`crate::core::runner::requests_help`] still see a plain `--help` as written.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn msys_would_rewrite(arg: &str) -> bool {
+    arg.is_empty()
+        || arg.chars().any(|c| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '\\' | '"' | '\'' | '*' | '?' | '[' | ']' | '{' | '}' | '~' | '@'
+                )
+        })
+}
+
 /// Pass caller-supplied arguments to a child so that MSYS/Cygwin children on
 /// Windows receive them intact.
 ///
@@ -555,14 +584,32 @@ impl ChildArgExt for Command {
 /// bypass the escaping std applies for them.
 #[cfg(windows)]
 fn push_child_arg(cmd: &mut Command, arg: &OsStr) {
+    use std::os::windows::process::CommandExt;
     match arg.to_str() {
-        Some(s) if s.contains('"') && !is_batch_program(cmd) => {
-            std::os::windows::process::CommandExt::raw_arg(cmd, quote_arg_for_child(s));
+        _ if is_batch_program(cmd) => {
+            cmd.arg(arg);
+        }
+        Some(s) if msys_would_rewrite(s) && is_msys_program(cmd) => {
+            cmd.raw_arg(quote_arg_for_msys(s));
+        }
+        Some(s) if s.contains('"') => {
+            cmd.raw_arg(quote_arg_for_child(s));
         }
         _ => {
             cmd.arg(arg);
         }
     }
+}
+
+/// An MSYS/Cygwin program ships beside its runtime DLL (Git for Windows'
+/// `usr\bin\grep.exe` beside `msys-2.0.dll`). Native builds such as rg, git and
+/// cargo do not, and keep std's MSVC encoding.
+#[cfg(windows)]
+fn is_msys_program(cmd: &Command) -> bool {
+    std::path::Path::new(cmd.get_program())
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .is_some_and(|dir| dir.join("msys-2.0.dll").is_file() || dir.join("cygwin1.dll").is_file())
 }
 
 #[cfg(windows)]
@@ -905,6 +952,15 @@ fn output_codepage() -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_for_terminal_strips_escape_bytes_but_keeps_layout() {
+        let hostile = "error at line 3:\n  message = \"\u{1b}[31mred\u{1b}[0m\"\tend";
+        let clean = sanitize_for_terminal(hostile);
+        assert!(!clean.contains('\u{1b}'), "{clean:?}");
+        assert!(clean.contains("red"));
+        assert!(clean.contains('\n') && clean.contains('\t'));
+    }
 
     #[test]
     fn test_strip_leading_bom_helper() {
@@ -1300,6 +1356,66 @@ mod tests {
         cmd.child_arg(r#""type""#);
         let args: Vec<_> = cmd.get_args().collect();
         assert_eq!(args, [r#""type""#]);
+    }
+
+    #[test]
+    fn test_quote_arg_for_msys_doubles_every_backslash() {
+        assert_eq!(quote_arg_for_msys(r"#\[ignore"), r##""#\\[ignore""##);
+        assert_eq!(quote_arg_for_msys(r"C:\x\"), r#""C:\\x\\""#);
+        assert_eq!(quote_arg_for_msys(r#"a\"b"#), r#""a\\\"b""#);
+    }
+
+    #[test]
+    fn test_quote_arg_for_msys_wraps_glob_and_quote_characters() {
+        assert_eq!(quote_arg_for_msys("*.rs"), r#""*.rs""#);
+        assert_eq!(quote_arg_for_msys("don't"), r#""don't""#);
+        assert_eq!(quote_arg_for_msys(""), r#""""#);
+    }
+
+    /// End to end through a real MSYS binary, where one is installed.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_child_arg_round_trips_through_an_msys_program() {
+        let Ok(printf) = resolve_binary("printf") else {
+            return;
+        };
+        let mut cmd = Command::new(&printf);
+        if !is_msys_program(&cmd) {
+            return;
+        }
+        let args = [
+            r"#\[ignore",
+            r"a\\b",
+            r"C:\x\",
+            r#"a\"b"#,
+            "*",
+            "{a,b}",
+            "don't",
+            "~",
+            "@resp",
+            "",
+            // Left unquoted by `msys_would_rewrite`: these must reach the child as typed too.
+            "%PATH%",
+            "^&|<>",
+            "$HOME",
+            "`x`",
+            "a;b",
+            "(x)",
+            "-",
+            "ü🎉",
+            // Quoted for their whitespace or backslashes.
+            "a b",
+            "tab\there",
+            "line\nbreak",
+            r"\",
+            r"\\server\share",
+            r"C:\Program Files\x",
+        ];
+        cmd.child_arg("%s\\0").child_args(args);
+        let out = cmd.output().expect("printf runs");
+        let got = String::from_utf8(out.stdout).unwrap();
+        let got: Vec<&str> = got.split('\0').collect();
+        assert_eq!(got[..got.len() - 1], args);
     }
 
     // ===== Windows-specific PATHEXT resolution tests (issue #212) =====

@@ -682,6 +682,14 @@ pub(crate) fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool
 /// hiding behind a construct another segmenter would leave intact.
 /// Callers must still gate on [`contains_unattestable_construct`] first.
 pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
+    split_segments(cmd, true)
+}
+
+pub fn split_for_wrappers(cmd: &str) -> Vec<&str> {
+    split_segments(cmd, false)
+}
+
+fn split_segments(cmd: &str, truncate_at_redirect: bool) -> Vec<&str> {
     let trimmed = cmd.trim();
     if trimmed.is_empty() {
         return vec![];
@@ -734,7 +742,7 @@ pub fn split_for_permissions(cmd: &str) -> Vec<&str> {
                 seg_start = end;
                 i = next;
                 continue;
-            } else if seg_end.is_none() {
+            } else if truncate_at_redirect && seg_end.is_none() {
                 seg_end = Some(tok.offset);
             }
         } else if tok.kind == TokenKind::Arg
@@ -866,7 +874,7 @@ fn resolve_word_text(raw: &str) -> String {
 /// Quote-aware split of a single shell command into argv-ready words: quotes
 /// stripped, backslash escapes resolved — for callers that hand the result
 /// straight to `Command::new`/exec or compare it against literal words
-/// (`hooks/mod.rs::is_claude_hook_command`, `rtk proxy` arg-splitting).
+/// (`hooks/mod.rs::is_claude_hook_command`, `rtk bypass` arg-splitting).
 pub fn shell_split(input: &str) -> Vec<String> {
     coalesce_words(input, &tokenize(input))
         .into_iter()
