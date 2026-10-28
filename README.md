@@ -22,7 +22,7 @@ RGG is Ryan Duguid's distribution of [RTK](https://github.com/rtk-ai/rtk), the R
 RGG has no prebuilt binaries. Build it from source with Rust:
 
 ```bash
-cargo install --git https://github.com/ryanduguid/rgg rtk --locked
+cargo install --git https://github.com/EquityBot/rgg rtk --locked
 rtk --version   # rtk 1.0.1+rgg
 ```
 
