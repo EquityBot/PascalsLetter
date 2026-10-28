@@ -15,7 +15,7 @@
 
 </div>
 
-RGG is Ryan Duguid's distribution of [RTK](https://github.com/rtk-ai/rtk), the Rust Token Killer. RTK filters and compresses command output before it reaches your coding agent's context: one Rust binary, more than 100 supported commands. RGG tracks upstream RTK and adds fixes where compression lost or mangled output an agent needed, several of them on Windows. It installs a binary named `rtk`, so hooks, agent configuration and every `rtk` command work unchanged.
+RGG is EquityBot's distribution of [RTK](https://github.com/rtk-ai/rtk), the Rust Token Killer. RTK filters and compresses command output before it reaches your coding agent's context: one Rust binary, more than 100 supported commands. RGG tracks upstream RTK and adds fixes where compression lost or mangled output an agent needed, several of them on Windows. It installs a binary named `rtk`, so hooks, agent configuration and every `rtk` command work unchanged.
 
 ## Install
 
@@ -268,4 +268,4 @@ The `rtk-proxy` daemon (`proxy/`) is **BUSL-1.1** on the same terms and ships as
 
 ---
 
-<p align="center"><sub><code>Congratulations, you've just advanced a Compression level.</code><br>Made in Newcastle, Australia by <a href="https://duguid.com.au/">Ryan Duguid</a>.</sub></p>
+<p align="center"><sub><code>Congratulations, you've just advanced a Compression level.</code><br>Made by <a href="https://github.com/EquityBot">EquityBot</a>. <i>Ad gloriam eius, non meam.</i></sub></p>
