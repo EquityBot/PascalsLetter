@@ -42,7 +42,7 @@ Each change has a regression test, except `grep_max_results`.
 | `gh api` | GitHub API `*_url` links are dropped, with the whole response kept for `rtk recall`. Anything left unfiltered is written back byte for byte, and `--jq` and `--template` are untouched. |
 | `rtk gain` | The summary, per-command and daily, weekly and monthly tables count an oversised row at a fixed 7,500-token cap, and the headline figure is net. |
 
-Generally useful fixes are offered upstream as draft pull requests, listed in [FORKS.md](https://github.com/ryanduguid/ryanduguid/blob/main/FORKS.md).
+Generally useful fixes are offered upstream as draft pull requests, listed in [FORKS.md](https://github.com/EquityBot/EquityBot/blob/main/FORKS.md).
 
 ## Inherited from RTK
 
