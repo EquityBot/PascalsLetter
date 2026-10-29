@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this work, cite it with this metadata and the release tag or commit you used."
+title: "RGG"
+type: software
+authors:
+  - name: "RTK AI Labs"
+abstract: "A distribution of RTK: command output, compressed before your coding agent reads it."
+repository-code: "https://github.com/EquityBot/rgg"
+license-url: "https://github.com/EquityBot/rgg/blob/develop/LICENSE"
+keywords:
+  - claude-code
+  - cli
+  - developer-tools
+  - llm
+  - rust
+  - token-optimization
+references:
+  - type: software
+    title: "RTK"
+    authors:
+      - name: "RTK AI Labs"
+    repository-code: "https://github.com/rtk-ai/rtk"

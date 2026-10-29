@@ -1,0 +1,36 @@
+# RGG
+
+> EquityBot's distribution of RTK, the Rust Token Killer: one Rust binary that filters and
+> compresses command output before it reaches a coding agent's context. It has no prebuilt
+> binaries and installs a binary named `rtk`, so it replaces any upstream RTK install.
+
+Version `1.0.1+rgg`, built from source with
+`cargo install --git https://github.com/EquityBot/rgg rtk --locked`. Add
+`--no-default-features` for the Apache-2.0-only build without the compression engine.
+
+## Start
+
+- [README](https://github.com/EquityBot/rgg#readme): install, what RGG changes from RTK and the licence terms.
+- [Quick Start](https://github.com/EquityBot/rgg/blob/develop/docs/guide/getting-started/quick-start.md): set up an agent with `rtk init` and see the first savings.
+- [How RTK Savings Work](https://github.com/EquityBot/rgg/blob/develop/docs/guide/resources/savings-explained.md): what the savings figures measure and what they do not.
+
+## Docs
+
+The guide is this repository's copy of the RTK guide; its install commands install upstream RTK, not RGG.
+
+- [Configuration](https://github.com/EquityBot/rgg/blob/develop/docs/guide/getting-started/configuration.md): `config.toml`, environment variables and per-project filters.
+- [Supported Agents](https://github.com/EquityBot/rgg/blob/develop/docs/guide/getting-started/supported-agents.md): set-up for each supported agent.
+- [What RTK Optimizes](https://github.com/EquityBot/rgg/blob/develop/docs/guide/resources/what-rtk-covers.md): commands and ecosystems covered.
+- [Token Savings Analytics](https://github.com/EquityBot/rgg/blob/develop/docs/guide/analytics/gain.md): measuring savings with `rtk gain`.
+- [Pipelines](https://github.com/EquityBot/rgg/blob/develop/docs/guide/pipelines/overview.md): composing the engine with `pipeline.toml`.
+- [RTK Proxy](https://github.com/EquityBot/rgg/blob/develop/docs/guide/proxy/overview.md): the separate `rtk-proxy` daemon.
+- [Editions and Licensing](https://github.com/EquityBot/rgg/blob/develop/docs/guide/resources/editions.md): the Apache-2.0 edition and the BUSL-1.1 engine.
+- [Telemetry & Privacy](https://github.com/EquityBot/rgg/blob/develop/docs/guide/resources/telemetry.md): what is collected and how to opt out.
+- [Troubleshooting](https://github.com/EquityBot/rgg/blob/develop/docs/guide/resources/troubleshooting.md): common issues and fixes.
+- [Contributing](https://github.com/EquityBot/rgg/blob/develop/CONTRIBUTING.md): PR process and checks.
+- [Security Policy](https://github.com/EquityBot/rgg/blob/develop/SECURITY.md): reporting a vulnerability.
+
+## Related
+
+- [EquityBot](https://github.com/EquityBot): other EquityBot tools.
+- [RTK](https://github.com/rtk-ai/rtk): the upstream project RGG tracks.
