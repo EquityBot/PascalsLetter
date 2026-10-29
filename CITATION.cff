@@ -4,6 +4,7 @@ title: "RGG"
 type: software
 authors:
   - name: "RTK AI Labs"
+  - name: "EquityBot"
 abstract: "A distribution of RTK: command output, compressed before your coding agent reads it."
 repository-code: "https://github.com/EquityBot/rgg"
 license-url: "https://github.com/EquityBot/rgg/blob/develop/LICENSE"

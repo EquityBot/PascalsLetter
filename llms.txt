@@ -2,7 +2,7 @@
 
 > EquityBot's distribution of RTK, the Rust Token Killer: one Rust binary that filters and
 > compresses command output before it reaches a coding agent's context. It has no prebuilt
-> binaries and installs a binary named `rtk`, so it replaces any upstream RTK install.
+> binaries and installs a binary named `rtk`, as upstream RTK does, so uninstall any other RTK copy first.
 
 Version `1.0.1+rgg`, built from source with
 `cargo install --git https://github.com/EquityBot/rgg rtk --locked`. Add
