@@ -1,13 +1,13 @@
 cff-version: 1.2.0
 message: "If you use this work, cite it with this metadata and the release tag or commit you used."
-title: "RGG"
+title: "PascalsLetter"
 type: software
 authors:
   - name: "RTK AI Labs"
   - name: "EquityBot"
 abstract: "A distribution of RTK: command output, compressed before your coding agent reads it."
-repository-code: "https://github.com/EquityBot/rgg"
-license-url: "https://github.com/EquityBot/rgg/blob/develop/LICENSE"
+repository-code: "https://github.com/EquityBot/PascalsLetter"
+license-url: "https://github.com/EquityBot/PascalsLetter/blob/develop/LICENSE"
 keywords:
   - claude-code
   - cli
