@@ -9,8 +9,8 @@
 
 <div align="center">
 
-[![CodeQL](https://img.shields.io/github/actions/workflow/status/EquityBot/rgg/codeql.yml?branch=develop&label=CodeQL&labelColor=000000&style=flat)](https://github.com/EquityBot/rgg/actions/workflows/codeql.yml) [![Codacy](https://img.shields.io/codacy/grade/68c5d91770634f3b86493583fd8eada6/develop?label=Codacy&labelColor=000000&style=flat)](https://app.codacy.com/gh/ryanduguid/rtk/dashboard)<br>
-[![rust: 1.91+](https://img.shields.io/badge/rust-1.91%2B-66023C?labelColor=000000&style=flat&color=66023C)](https://www.rust-lang.org/) [![licence: Apache-2.0 AND BUSL-1.1](https://img.shields.io/badge/licence-Apache--2.0%20AND%20BUSL--1.1-66023C?labelColor=000000&style=flat&color=66023C)](#licence) [![fork of: RTK](https://img.shields.io/badge/fork%20of-RTK-66023C?labelColor=000000&style=flat&color=66023C)](https://github.com/rtk-ai/rtk)
+[![CodeQL](https://github.com/EquityBot/rgg/actions/workflows/codeql.yml/badge.svg?branch=develop)](https://github.com/EquityBot/rgg/actions/workflows/codeql.yml) [![Codacy](https://app.codacy.com/project/badge/Grade/68c5d91770634f3b86493583fd8eada6?branch=develop)](https://app.codacy.com/gh/ryanduguid/rtk/dashboard)<br>
+[![rust: 1.91+](.github/assets/badges/rust.svg)](https://www.rust-lang.org/) [![licence: Apache-2.0 AND BUSL-1.1](.github/assets/badges/licence.svg)](#licence) [![fork of: RTK](.github/assets/badges/fork-of.svg)](https://github.com/rtk-ai/rtk)
 
 [Install](#install) · [What RGG changes](#what-rgg-changes) · [Inherited from RTK](#inherited-from-rtk) · [Credits](#credits) · [Licence](#licence)
 
