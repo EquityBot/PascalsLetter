@@ -8,10 +8,10 @@
 
 <p align="center">
   <a href="https://github.com/rtk-ai/rtk/actions"><img src="https://github.com/rtk-ai/rtk/workflows/Security%20Check/badge.svg" alt="CI"></a>
-  <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://img.shields.io/github/v/release/rtk-ai/rtk?style=flat&labelColor=000000&color=66023C" alt="Release"></a>
-  <a href="#licence"><img src="https://img.shields.io/badge/License-Apache--2.0%20%2B%20BUSL--1.1-66023C?style=flat&labelColor=000000&color=66023C" alt="License: Apache-2.0 and BUSL-1.1"></a>
-  <a href="https://discord.gg/RySmvNF5kF"><img src="https://img.shields.io/discord/1478373640461488159?label=Discord&logo=discord&style=flat&labelColor=000000&logoColor=E5E4E2&color=66023C" alt="Discord"></a>
-  <a href="https://formulae.brew.sh/formula/rtk"><img src="https://img.shields.io/homebrew/v/rtk?style=flat&labelColor=000000&color=66023C" alt="Homebrew"></a>
+  <a href="https://github.com/rtk-ai/rtk/releases"><img src="https://badgen.net/github/release/rtk-ai/rtk/stable?label=release&color=66023C&labelColor=000000" alt="Release"></a>
+  <a href="#licence"><img src=".github/assets/badges/licence-translations.svg" alt="License: Apache-2.0 and BUSL-1.1"></a>
+  <a href="https://discord.gg/RySmvNF5kF"><img src="https://badgen.net/discord/online-members/RySmvNF5kF?label=Discord&icon=discord&color=66023C&labelColor=000000" alt="Discord"></a>
+  <a href="https://formulae.brew.sh/formula/rtk"><img src="https://badgen.net/homebrew/v/rtk?label=homebrew&color=66023C&labelColor=000000" alt="Homebrew"></a>
 </p>
 
 <p align="center">
