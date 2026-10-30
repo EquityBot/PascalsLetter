@@ -26,7 +26,7 @@ fn dep_line(crate_name: &str, subpath: &str) -> String {
             )
         }
         None => {
-            // A distribution build's `+rgg` metadata names no upstream tag.
+            // A distribution build's `+pascalsletter` metadata names no upstream tag.
             let version = env!("CARGO_PKG_VERSION");
             let tag = format!("v{}", version.split('+').next().unwrap_or(version));
             format!("{crate_name} = {{ git = \"{GIT_URL}\", tag = \"{tag}\" }}")

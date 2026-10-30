@@ -3,33 +3,33 @@
     <source media="(max-width: 600px) and (prefers-color-scheme: light)" srcset=".github/assets/banner-phone-light.svg">
     <source media="(max-width: 600px)" srcset=".github/assets/banner-phone.svg">
     <source media="(prefers-color-scheme: light)" srcset=".github/assets/banner-light.svg">
-    <img src=".github/assets/banner.svg" width="100%" alt="RGG. Command output, compressed before your agent reads it. Pixel art of a funnel catching lines of text beside the RGG wordmark in slab-serif block letters.">
+    <img src=".github/assets/banner.svg" width="100%" alt="PascalsLetter. Command output, compressed before your agent reads it. Pixel art of a funnel catching lines of text beside the PascalsLetter wordmark in slab-serif block letters.">
   </picture>
 </p>
 
 <div align="center">
 
-[![CodeQL](https://github.com/EquityBot/rgg/actions/workflows/codeql.yml/badge.svg?branch=develop)](https://github.com/EquityBot/rgg/actions/workflows/codeql.yml) [![Codacy](https://app.codacy.com/project/badge/Grade/68c5d91770634f3b86493583fd8eada6?branch=develop)](https://app.codacy.com/gh/ryanduguid/rtk/dashboard)<br>
+[![CodeQL](https://github.com/EquityBot/PascalsLetter/actions/workflows/codeql.yml/badge.svg?branch=develop)](https://github.com/EquityBot/PascalsLetter/actions/workflows/codeql.yml) [![Codacy](https://app.codacy.com/project/badge/Grade/68c5d91770634f3b86493583fd8eada6?branch=develop)](https://app.codacy.com/gh/ryanduguid/rtk/dashboard)<br>
 [![rust: 1.91+](.github/assets/badges/rust.svg)](https://www.rust-lang.org/) [![licence: Apache-2.0 AND BUSL-1.1](.github/assets/badges/licence.svg)](#licence) [![fork of: RTK](.github/assets/badges/fork-of.svg)](https://github.com/rtk-ai/rtk)
 
-[Install](#install) · [What RGG changes](#what-rgg-changes) · [Inherited from RTK](#inherited-from-rtk) · [Credits](#credits) · [Licence](#licence)
+[Install](#install) · [What PascalsLetter changes](#what-pascalsletter-changes) · [Inherited from RTK](#inherited-from-rtk) · [Credits](#credits) · [Licence](#licence)
 
 </div>
 
-RGG is EquityBot's distribution of [RTK](https://github.com/rtk-ai/rtk), the Rust Token Killer. RTK filters and compresses command output before it reaches your coding agent's context: one Rust binary, more than 100 supported commands. RGG tracks upstream RTK and adds fixes where compression lost or mangled output an agent needed, several of them on Windows. It installs a binary named `rtk`, so hooks, agent configuration and every `rtk` command work unchanged.
+PascalsLetter is EquityBot's distribution of [RTK](https://github.com/rtk-ai/rtk), the Rust Token Killer. RTK filters and compresses command output before it reaches your coding agent's context: one Rust binary, more than 100 supported commands. PascalsLetter tracks upstream RTK and adds fixes where compression lost or mangled output an agent needed, several of them on Windows. It installs a binary named `rtk`, so hooks, agent configuration and every `rtk` command work unchanged.
 
 ## Install
 
-RGG has no prebuilt binaries. Build it from source with Rust:
+PascalsLetter has no prebuilt binaries. Build it from source with Rust:
 
 ```bash
-cargo install --git https://github.com/EquityBot/rgg rtk --locked
-rtk --version   # rtk 1.0.1+rgg
+cargo install --git https://github.com/EquityBot/PascalsLetter rtk --locked
+rtk --version   # rtk 1.0.1+pascalsletter
 ```
 
-RGG and upstream RTK both install `rtk`, so uninstall any Homebrew, winget or `install.sh` copy of RTK first. Add `--no-default-features` for the Apache-2.0-only build without the compression engine. Then set up your agent with `rtk init` as in [Quick Start](#quick-start). The `rtk-proxy` daemon is a separate package that this command does not install; build it with `cargo build --release --manifest-path proxy/Cargo.toml`.
+PascalsLetter and upstream RTK both install `rtk`, so uninstall any Homebrew, winget or `install.sh` copy of RTK first. Add `--no-default-features` for the Apache-2.0-only build without the compression engine. Then set up your agent with `rtk init` as in [Quick Start](#quick-start). The `rtk-proxy` daemon is a separate package that this command does not install; build it with `cargo build --release --manifest-path proxy/Cargo.toml`.
 
-## What RGG changes
+## What PascalsLetter changes
 
 Each change has a regression test, except `grep_max_results`.
 
@@ -48,7 +48,7 @@ Generally useful fixes are offered upstream as draft pull requests, listed in [F
 
 ## Inherited from RTK
 
-Everything below describes RTK as RGG inherits it. Guide links go to this repository's copy of the RTK guide; its install commands install upstream RTK, not RGG.
+Everything below describes RTK as PascalsLetter inherits it. Guide links go to this repository's copy of the RTK guide; its install commands install upstream RTK, not PascalsLetter.
 
 rtk filters and compresses command outputs before they reach your LLM context. Single Rust binary, 100+ supported commands, <10ms overhead.
 
@@ -252,11 +252,11 @@ RTK collects **no command content and no file contents**. Telemetry is anonymous
 
 ## Credits
 
-RGG is built on [RTK](https://github.com/rtk-ai/rtk) by rtk-ai, founded by Patrick Szymkowiak, with core contributors Florian Bruniaux, Adrien Eppling, Nicolas Le Cam and Takayuki Maeda. Translations of the upstream README: [Français](README_fr.md), [中文](README_zh.md), [日本語](README_ja.md), [한국어](README_ko.md), [Español](README_es.md) and [Português](README_pt.md).
+PascalsLetter is built on [RTK](https://github.com/rtk-ai/rtk) by rtk-ai, founded by Patrick Szymkowiak, with core contributors Florian Bruniaux, Adrien Eppling, Nicolas Le Cam and Takayuki Maeda. Translations of the upstream README: [Français](README_fr.md), [中文](README_zh.md), [日本語](README_ja.md), [한국어](README_ko.md), [Español](README_es.md) and [Português](README_pt.md).
 
 The banner's lettering and emblem are drawn from Cascadia Mono glyphs (SIL OFL 1.1).
 
-Report RGG problems in this repository's issues. For RTK itself, use [rtk-ai/rtk](https://github.com/rtk-ai/rtk) or its [Discord](https://discord.gg/RySmvNF5kF).
+Report PascalsLetter problems in this repository's issues. For RTK itself, use [rtk-ai/rtk](https://github.com/rtk-ai/rtk) or its [Discord](https://discord.gg/RySmvNF5kF).
 
 ## Licence
 
