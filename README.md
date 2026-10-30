@@ -41,6 +41,7 @@ Each change has a regression test, except `grep_max_results`.
 | `git diff` | Shown verbatim up to `agent_output_max_chars`. Above it, a compacted diff or show ends with `[full output: rtk recall <hash>]`, or `[full diff: rtk git diff --no-compact]` when recall cannot store it. |
 | `rtk read` | Exact line ranges, and a missing-file error worded as `cat` words it. |
 | `gh api` | GitHub API `*_url` links are dropped, with the whole response kept for `rtk recall`. Anything left unfiltered is written back byte for byte, and `--jq` and `--template` are untouched. |
+| `yadm` | Removed from the `git` rewrite rule, which would run git on the current project instead of yadm's dotfiles repository. It goes through `rtk yadm`, and `rtk discover` lists it as unhandled, as it does `jq` and other commands with only a TOML filter. From [kylehgc/rtk](https://github.com/kylehgc/rtk/commit/1d672725f8cf9d43da32212310dd7abb5bca814d) by RawNuke (Apache-2.0); see [rtk-ai/rtk#3408](https://github.com/rtk-ai/rtk/issues/3408). |
 | `rtk gain` | The summary, per-command and daily, weekly and monthly tables count an oversised row at a fixed 7,500-token cap, and the headline figure is net. |
 
 Generally useful fixes are offered upstream as draft pull requests, listed in [FORKS.md](https://github.com/EquityBot/EquityBot/blob/main/FORKS.md).
