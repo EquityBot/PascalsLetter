@@ -58,10 +58,13 @@ impl Default for RtkRule {
 /// `core::tracking::SUBCOMMAND_ROUTERS`, or its telemetry label stops at the tool name.
 pub const RULES: &[RtkRule] = &[
     RtkRule {
-        pattern: r"^(?:git|yadm)\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree)(?:\s|$|[;|&()<>])",
+        // yadm stays out of this rule: `rtk git` would run git on the current
+        // project, not yadm's dotfiles repository. Change adapted from
+        // kylehgc/rtk 1d672725 by RawNuke (Apache-2.0); see rtk-ai/rtk#3408.
+        pattern: r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree)(?:\s|$|[;|&()<>])",
         rtk_cmd: "rtk git",
         pipeline_safety: PipelineSafety::ProducerOnly,
-        rewrite_prefixes: &["git", "yadm"],
+        rewrite_prefixes: &["git"],
         category: "Git",
         savings_pct: 70.0,
         subcmd_savings: &[
