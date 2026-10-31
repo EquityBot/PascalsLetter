@@ -3,6 +3,9 @@
  */
 
 import { $ } from "bun";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const VM_NAME = "rtk-test";
 const CLOUD_INIT = "scripts/benchmark/cloud-init.yaml";
@@ -101,11 +104,18 @@ export async function vmBuildRtk(projectRoot: string): Promise<{
 }> {
   console.log("[vm] Transferring RTK source...");
 
-  // Create tarball excluding heavy dirs and macOS resource forks (._*)
-  await $`COPYFILE_DISABLE=1 tar czf /tmp/rtk-src.tar.gz --exclude target --exclude .git --exclude node_modules --exclude "index.html*" --exclude "._*" -C ${projectRoot} .`;
-  await vmTransfer("/tmp/rtk-src.tar.gz", "/tmp/rtk-src.tar.gz");
+  // Create tarball excluding heavy dirs and macOS resource forks (._*), in a
+  // directory made for this run so no other local user can plant the file.
+  const workDir = await mkdtemp(join(tmpdir(), "rtk-src-"));
+  const tarball = join(workDir, "rtk-src.tar.gz");
+  try {
+    await $`COPYFILE_DISABLE=1 tar czf ${tarball} --exclude target --exclude .git --exclude node_modules --exclude "index.html*" --exclude "._*" -C ${projectRoot} .`;
+    await vmTransfer(tarball, "/home/ubuntu/rtk-src.tar.gz");
+  } finally {
+    await rm(workDir, { recursive: true, force: true });
+  }
   await vmExec(
-    "mkdir -p /home/ubuntu/rtk && cd /home/ubuntu/rtk && tar xzf /tmp/rtk-src.tar.gz"
+    "mkdir -p /home/ubuntu/rtk && cd /home/ubuntu/rtk && tar xzf /home/ubuntu/rtk-src.tar.gz"
   );
 
   console.log("[vm] Building RTK (release)...");

@@ -67,7 +67,7 @@ get_latest_version() {
     # Fallback to the REST API if the redirect didn't yield a tag.
     if [ -z "$VERSION" ]; then
         warn "Redirect lookup failed, falling back to GitHub API..."
-        VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
+        VERSION=$(curl --proto '=https' --tlsv1.2 -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
             | grep '"tag_name":' \
             | sed -E 's/.*"([^"]+)".*/\1/')
     fi
@@ -106,12 +106,12 @@ install() {
     ASSET_NAME="${ASSET_PREFIX}-${TARGET}.tar.gz"
 
     info "Downloading from: $DOWNLOAD_URL"
-    if ! curl -fsSL "$DOWNLOAD_URL" -o "$ARCHIVE"; then
+    if ! curl --proto '=https' --tlsv1.2 -fsSL "$DOWNLOAD_URL" -o "$ARCHIVE"; then
         error "Failed to download binary"
     fi
 
     info "Downloading checksums..."
-    if ! curl -fsSL "$CHECKSUMS_URL" -o "$CHECKSUMS"; then
+    if ! curl --proto '=https' --tlsv1.2 -fsSL "$CHECKSUMS_URL" -o "$CHECKSUMS"; then
         error "Failed to download checksums.txt — refusing to install unverified binary (set RTK_SKIP_CHECKSUM=1 to bypass at your own risk)"
     fi
 

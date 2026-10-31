@@ -2,11 +2,9 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in RTK, please report it to the maintainers privately:
+Report a vulnerability in PascalsLetter privately with GitHub's [Report a vulnerability form](https://github.com/EquityBot/PascalsLetter/security/advisories/new). Include a clear description, safe reproduction steps, the impact and any suggested mitigation.
 
-- **Email**: security@rtk-ai.app (or create a private security advisory on GitHub)
-- **Response time**: We aim to acknowledge reports within 48 hours
-- **Disclosure**: We follow responsible disclosure practices (90-day embargo)
+A vulnerability that upstream RTK shares can also go to RTK's maintainers, as [RTK's security policy](https://github.com/rtk-ai/rtk/blob/develop/SECURITY.md) describes.
 
 **Please do NOT:**
 - Open public GitHub issues for security vulnerabilities

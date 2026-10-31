@@ -9,7 +9,7 @@
 
 <div align="center">
 
-[![CodeQL](https://github.com/EquityBot/PascalsLetter/actions/workflows/codeql.yml/badge.svg?branch=develop)](https://github.com/EquityBot/PascalsLetter/actions/workflows/codeql.yml) [![Codacy](https://app.codacy.com/project/badge/Grade/68c5d91770634f3b86493583fd8eada6?branch=develop)](https://app.codacy.com/gh/ryanduguid/rtk/dashboard)<br>
+[![tests](https://github.com/EquityBot/PascalsLetter/actions/workflows/coverage.yml/badge.svg?branch=develop)](https://github.com/EquityBot/PascalsLetter/actions/workflows/coverage.yml) [![Codecov](https://codecov.io/gh/EquityBot/PascalsLetter/graph/badge.svg)](https://codecov.io/gh/EquityBot/PascalsLetter) [![CodeQL](https://github.com/EquityBot/PascalsLetter/actions/workflows/codeql.yml/badge.svg?branch=develop)](https://github.com/EquityBot/PascalsLetter/actions/workflows/codeql.yml) [![Snyk](https://github.com/EquityBot/PascalsLetter/actions/workflows/snyk.yml/badge.svg?branch=develop)](https://github.com/EquityBot/PascalsLetter/actions/workflows/snyk.yml) [![SonarCloud](https://sonarcloud.io/api/project_badges/measure?project=EquityBot_rgg&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=EquityBot_rgg) [![Codacy](https://app.codacy.com/project/badge/Grade/68c5d91770634f3b86493583fd8eada6?branch=develop)](https://app.codacy.com/gh/ryanduguid/rtk/dashboard)<br>
 [![rust: 1.91+](.github/assets/badges/rust.svg)](https://www.rust-lang.org/) [![licence: Apache-2.0 AND BUSL-1.1](.github/assets/badges/licence.svg)](#licence) [![fork of: RTK](.github/assets/badges/fork-of.svg)](https://github.com/rtk-ai/rtk)
 
 [Install](#install) · [What PascalsLetter changes](#what-pascalsletter-changes) · [Inherited from RTK](#inherited-from-rtk) · [Credits](#credits) · [Licence](#licence)

@@ -248,7 +248,7 @@ your branch --> develop (review + CI + integration testing) --> version branch -
 
 ## Testing
 
-Every change **must** include tests. We follow **TDD (Red-Green-Refactor)**: write a failing test first, implement the minimum to pass, then refactor.
+Every change **must** include tests. New functionality and bug fixes come with automated tests, in `#[cfg(test)]` modules beside the code or in `tests/`, run by `cargo test --all` in CI. We follow **TDD (Red-Green-Refactor)**: write a failing test first, implement the minimum to pass, then refactor.
 
 For how to write tests (fixtures, snapshots, token savings verification), see [docs/contributing/TECHNICAL.md — Testing](docs/contributing/TECHNICAL.md#8-testing).
 
