@@ -80,7 +80,7 @@ jobs:
           sudo apt-get install -y musl-tools
 
       - name: Build rtk
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --locked --release --target ${{ matrix.target }}
         env:
           RTK_TELEMETRY_URL: ${{ vars.RTK_TELEMETRY_URL }}
           RTK_TELEMETRY_TOKEN: ${{ secrets.RTK_TELEMETRY_TOKEN }}
@@ -116,7 +116,7 @@ jobs:
       # so only LICENSE travels with it. Same binary name `rtk` inside -- an
       # installed hook command must keep working across editions.
       - name: Build rtk (Apache-2.0 edition)
-        run: cargo build --release --no-default-features --target ${{ matrix.target }}
+        run: cargo build --locked --release --no-default-features --target ${{ matrix.target }}
         env:
           RTK_TELEMETRY_URL: ${{ vars.RTK_TELEMETRY_URL }}
           RTK_TELEMETRY_TOKEN: ${{ secrets.RTK_TELEMETRY_TOKEN }}
@@ -156,7 +156,7 @@ jobs:
       - name: Build rtk-proxy
         id: build_proxy
         run: >
-          cargo build --release
+          cargo build --locked --release
           --manifest-path proxy/Cargo.toml
           --target-dir target
           --target ${{ matrix.target }}
@@ -220,7 +220,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Install cargo-deb
         run: cargo install cargo-deb
@@ -253,7 +253,7 @@ jobs:
         run: cargo install cargo-generate-rpm
 
       - name: Build release
-        run: cargo build --release --no-default-features
+        run: cargo build --locked --release --no-default-features
         env:
           RTK_TELEMETRY_URL: ${{ vars.RTK_TELEMETRY_URL }}
           RTK_TELEMETRY_TOKEN: ${{ secrets.RTK_TELEMETRY_TOKEN }}
@@ -283,7 +283,7 @@ jobs:
         run: cargo install cargo-generate-rpm
 
       - name: Build release
-        run: cargo build --release
+        run: cargo build --locked --release
         env:
           RTK_TELEMETRY_URL: ${{ vars.RTK_TELEMETRY_URL }}
           RTK_TELEMETRY_TOKEN: ${{ secrets.RTK_TELEMETRY_TOKEN }}
