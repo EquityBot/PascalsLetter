@@ -57,10 +57,14 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
-          # shortcut: cargo-cyclonedx writes one SBOM per workspace member, and
-          # only the root package's is tested. It lists every third-party crate
-          # the members use today; if a member adds one the root lacks, test
-          # each member's snyk-sbom.json as well.
+          # cargo-cyclonedx writes one SBOM beside each workspace member's
+          # manifest; each is tested.
           cargo cyclonedx --format json --spec-version 1.5 --override-filename snyk-sbom
           [ -n "$SNYK_TOKEN" ] || { echo "::error::The SNYK_TOKEN repository secret is not set, so nothing was scanned."; exit 1; }
-          snyk sbom test --experimental --file=snyk-sbom.json
+          mapfile -t sboms < <(find . -name snyk-sbom.json -not -path './target/*' | sort)
+          [ "${#sboms[@]}" -gt 0 ] || { echo "::error::cargo-cyclonedx wrote no SBOM."; exit 1; }
+          status=0
+          for sbom in "${sboms[@]}"; do
+            snyk sbom test --experimental --file="$sbom" || status=1
+          done
+          exit "$status"
