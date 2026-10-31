@@ -1,0 +1,78 @@
+name: Coverage
+
+# ci.yml runs on pull requests only, so the test suite also runs here, under
+# cargo-llvm-cov, on every push to develop. Its result is the README's tests
+# badge, and its report feeds the Codecov badge.
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test with coverage (ubuntu-latest)
+    # A fork's pull request gets no Codecov upload; ci.yml still tests it.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install required search tools
+        run: sudo apt-get update && sudo apt-get install -y ripgrep grep
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Install the pinned cargo-llvm-cov
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-llvm-cov@0.9.1
+          fallback: none
+      # The same tests as ci.yml's `cargo test --all`. An explicit target keeps
+      # the cross mode ci.yml's test legs use; cargo-llvm-cov hands it to rustc,
+      # which has no 'host-tuple', so the host triple is named. cargo-llvm-cov
+      # skips doctests, and the workspace has none.
+      - name: Run the tests with line coverage
+        run: CARGO_BUILD_TARGET="$(rustc --print host-tuple)" cargo llvm-cov --locked --workspace --lcov --output-path coverage-rust.lcov
+      - name: Keep the Rust coverage report for the Codecov upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-rust
+          path: coverage-rust.lcov
+          retention-days: 1
+
+  # The upload runs apart from the tests so the OIDC token is never available
+  # while test code runs. Keep it out of the required checks: a Codecov outage
+  # must not block merges.
+  codecov:
+    name: upload coverage to Codecov
+    needs: test
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # Authenticate the Codecov upload with OIDC; no stored token.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: coverage-rust
+      - uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          use_oidc: true
+          files: coverage-rust.lcov
+          disable_search: true
+          fail_ci_if_error: true

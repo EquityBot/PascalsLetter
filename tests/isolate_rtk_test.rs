@@ -27,10 +27,12 @@ fn key(name: &str) -> String {
 
 /// Defined by the child itself when its environment has none: cmd.exe sets `PROMPT`, and on
 /// macOS the CoreFoundation rtk links sets `__CF_USER_TEXT_ENCODING`, which the printer rtk
-/// runs then inherits.
+/// runs then inherits. Under `cargo llvm-cov`, the profiling runtime in rtk sets
+/// `__LLVM_PROFILE_RT_INIT_ONCE` the same way.
 fn defined_by_the_child(name: &str) -> bool {
     (cfg!(windows) && name == "PROMPT")
         || (cfg!(target_os = "macos") && name == "__CF_USER_TEXT_ENCODING")
+        || name == "__LLVM_PROFILE_RT_INIT_ONCE"
 }
 
 /// Runs `cmd`, which ends in printing the environment its last child gets, and checks that

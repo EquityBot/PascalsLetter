@@ -36,6 +36,7 @@ Trigger: pull_request to develop or master
 
      + DCO check (independent, develop PRs only)
      + Dependabot (weekly: Cargo deps + GitHub Actions)
+     + coverage.yml (also on push to develop: the tests under cargo-llvm-cov, then Codecov)
 ```
 
 ## Merge to develop — pre-release (cd.yml)

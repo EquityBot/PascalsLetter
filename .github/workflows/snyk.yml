@@ -1,0 +1,66 @@
+name: Snyk
+
+# Snyk runs weekly and when a dependency file changes, which keeps it inside
+# the free plan's monthly test allowance.
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [develop]
+    paths:
+      - "**/Cargo.lock"
+      - "**/Cargo.toml"
+      - ".github/workflows/snyk.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.lock"
+      - "**/Cargo.toml"
+      - ".github/workflows/snyk.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Snyk Rust dependencies (${{ matrix.root }})
+    # Pull requests from forks, and Dependabot's (which get Dependabot secrets
+    # only), receive no SNYK_TOKEN; the weekly run on develop scans their changes.
+    if: github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # proxy/ is its own workspace with its own Cargo.lock.
+        root: [".", proxy]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: snyk/actions/setup@9adf32b1121593767fc3c057af55b55db032dc04 # v1.0.0
+      # Snyk cannot read Cargo.lock directly, so the graph is described as a
+      # CycloneDX SBOM and tested with `snyk sbom test`.
+      - name: Install the SBOM generator
+        run: |
+          rustup toolchain install 1.91 --profile minimal
+          rustup default 1.91
+          cargo install cargo-cyclonedx --locked --version 0.5.9
+      - name: Test the Cargo graph
+        working-directory: ${{ matrix.root }}
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          # shortcut: cargo-cyclonedx writes one SBOM per workspace member, and
+          # only the root package's is tested. It lists every third-party crate
+          # the members use today; if a member adds one the root lacks, test
+          # each member's snyk-sbom.json as well.
+          cargo cyclonedx --format json --spec-version 1.5 --override-filename snyk-sbom
+          [ -n "$SNYK_TOKEN" ] || { echo "::error::The SNYK_TOKEN repository secret is not set, so nothing was scanned."; exit 1; }
+          snyk sbom test --experimental --file=snyk-sbom.json
