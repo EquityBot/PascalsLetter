@@ -6,16 +6,24 @@
 //! sending is friction with nothing behind it.
 //!
 //! So the header is remembered, in memory only, and served back to a request
-//! that arrives on the loopback listener without one.
+//! that arrives without one, carries the `x-rtk-proxy` header and names the
+//! daemon by `localhost` or an IP address in `Host`.
 //!
 //! # Why this is not a new exposure
 //!
-//! Anything that can reach 127.0.0.1 is running as the user, and a process
-//! running as the user can already read the credential directly — from the
-//! keychain, the environment, or the agent's own settings file. Holding it in
-//! memory grants nothing that was not already reachable. It is never written
-//! to disk, never logged, and never leaves the machine except to the provider
-//! it came from.
+//! A local process running as the user can already read the credential
+//! directly — from the keychain, the environment, or the agent's own settings
+//! file. Holding it in memory grants nothing that was not already reachable.
+//! It is never written to disk, never logged, and never leaves the machine
+//! except to the provider it came from.
+//!
+//! A web page is not such a process, yet the user's browser can reach
+//! 127.0.0.1. A cross-origin `POST` with a simple content type needs no
+//! preflight, so without the header check any page could spend the key. The
+//! header makes the request non-simple, and with no CORS layer its preflight
+//! fails, so the browser never sends it. A DNS-rebound page is same-origin and
+//! may set the header, but its `Host` names the attacker's domain, hence the
+//! `Host` check.
 //!
 //! The one case this does change is a sandboxed process that can open a
 //! loopback socket but cannot read the user keychain. That is narrow, and
@@ -65,17 +73,37 @@ impl RelayedAuth {
     /// The credential to attach to an outbound request, or `None` to leave it
     /// as it is. A request that brought its own is never substituted: that is
     /// traffic the agent authenticated itself, and the key it sent is the key
-    /// it gets billed on. Only a worker arriving empty-handed is served.
+    /// it gets billed on. Only a local worker arriving empty-handed is served.
     pub fn lend_if_missing(
         &self,
         provider: Provider,
         headers: &axum::http::HeaderMap,
     ) -> Option<(String, String)> {
-        if carries_credential(headers) {
+        if carries_credential(headers) || !from_local_worker(headers) {
             return None;
         }
         self.borrow(provider)
     }
+}
+
+/// Whether a request shows it comes from a local process rather than a web
+/// page: it carries the `x-rtk-proxy` header and its `Host` is `localhost` or
+/// an IP address, never a domain name a page could rebind (see module docs).
+fn from_local_worker(headers: &axum::http::HeaderMap) -> bool {
+    headers.contains_key(crate::server::CLI_HEADER)
+        && headers
+            .get(axum::http::header::HOST)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<axum::http::uri::Authority>().ok())
+            .is_some_and(|authority| {
+                let host = authority.host();
+                host.eq_ignore_ascii_case("localhost")
+                    || host
+                        .trim_start_matches('[')
+                        .trim_end_matches(']')
+                        .parse::<std::net::IpAddr>()
+                        .is_ok()
+            })
 }
 
 /// Whether a request already authenticates itself.
@@ -143,12 +171,48 @@ mod tests {
         assert!(a.borrow(Provider::Anthropic).is_none());
     }
 
+    /// What `rtk task` sends to the daemon: the CLI header and a loopback `Host`.
+    fn worker(host: &str) -> HeaderMap {
+        let mut h = with(crate::server::CLI_HEADER, "1");
+        h.insert("host", host.parse().unwrap());
+        h
+    }
+
     #[test]
     fn a_worker_arriving_without_a_key_is_served_the_remembered_one() {
         let a = RelayedAuth::default();
         a.remember(Provider::Anthropic, &with("x-api-key", "sk-ant-real"));
-        let lent = a.lend_if_missing(Provider::Anthropic, &HeaderMap::new());
-        assert_eq!(lent, Some(("x-api-key".into(), "sk-ant-real".into())));
+        for host in ["127.0.0.1:8080", "localhost:8080", "[::1]:8080", "0.0.0.0"] {
+            let lent = a.lend_if_missing(Provider::Anthropic, &worker(host));
+            assert_eq!(
+                lent,
+                Some(("x-api-key".into(), "sk-ant-real".into())),
+                "{host}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_a_web_page_could_send_is_never_lent_the_key() {
+        let a = RelayedAuth::default();
+        a.remember(Provider::Anthropic, &with("x-api-key", "sk-ant-real"));
+        // A simple cross-origin POST carries no custom header.
+        let mut simple = HeaderMap::new();
+        simple.insert("host", "127.0.0.1:8080".parse().unwrap());
+        // A DNS-rebound page may set the header, but names its own domain.
+        for headers in [
+            HeaderMap::new(),
+            simple,
+            with(crate::server::CLI_HEADER, "1"),
+            worker("attacker.example:8080"),
+            worker("127.0.0.1.attacker.example"),
+        ] {
+            assert_eq!(
+                a.lend_if_missing(Provider::Anthropic, &headers),
+                None,
+                "{headers:?}"
+            );
+        }
     }
 
     #[test]
@@ -156,7 +220,11 @@ mod tests {
         let a = RelayedAuth::default();
         a.remember(Provider::Anthropic, &with("x-api-key", "sk-ant-remembered"));
         assert_eq!(
-            a.lend_if_missing(Provider::Anthropic, &with("x-api-key", "sk-ant-mine")),
+            a.lend_if_missing(Provider::Anthropic, &{
+                let mut h = worker("127.0.0.1:8080");
+                h.insert("x-api-key", "sk-ant-mine".parse().unwrap());
+                h
+            }),
             None,
             "the key a caller sent is the key it gets billed on"
         );
@@ -166,7 +234,7 @@ mod tests {
     fn nothing_is_lent_before_anything_is_seen() {
         let a = RelayedAuth::default();
         assert_eq!(
-            a.lend_if_missing(Provider::Anthropic, &HeaderMap::new()),
+            a.lend_if_missing(Provider::Anthropic, &worker("127.0.0.1:8080")),
             None
         );
     }

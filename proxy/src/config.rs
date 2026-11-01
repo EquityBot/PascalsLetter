@@ -132,7 +132,8 @@ pub struct Config {
     pub pixel_compress: PixelCompressConfig,
     /// Lend the agent's relayed credential to a local worker that arrives
     /// without one, so delegating to the same provider needs no second copy
-    /// of a key the agent already sends. Loopback-only; see `relayed_auth`.
+    /// of a key the agent already sends. Only requests with the `x-rtk-proxy`
+    /// header and a `localhost` or IP `Host` borrow; see `relayed_auth`.
     pub relay_borrowing: bool,
     /// SQLite path for the usage store; empty/`off` disables recording.
     pub db: String,

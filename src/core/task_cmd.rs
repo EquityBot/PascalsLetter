@@ -534,6 +534,11 @@ fn call_anthropic(
     if let Some(key) = key.as_deref() {
         headers.push(("x-api-key", key));
     }
+    // The daemon lends its relayed credential only to a request carrying this
+    // header, which a web page cannot send to it.
+    if via_daemon {
+        headers.push(("x-rtk-proxy", "1"));
+    }
     // Only the daemon reads this, and only it can price the counterfactual.
     let displaced = via_daemon.then(displaced_model).flatten();
     if let Some(from) = displaced.as_deref() {
@@ -582,6 +587,9 @@ fn call_openai(
     let mut headers: Vec<(&str, &str)> = Vec::new();
     if let Some(auth) = auth.as_deref() {
         headers.push(("Authorization", auth));
+    }
+    if via_daemon {
+        headers.push(("x-rtk-proxy", "1"));
     }
     let displaced = via_daemon.then(displaced_model).flatten();
     if let Some(from) = displaced.as_deref() {
