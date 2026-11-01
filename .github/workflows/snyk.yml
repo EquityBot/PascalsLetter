@@ -91,8 +91,9 @@ jobs:
               return 1
             fi
             # One line per vulnerable path, `open` or `ignored`.
-            if ! findings=$(jq -r --argjson ignored "$ignored" '
-              if type == "array" then .[] else . end
+            if ! findings=$(jq -rn --argjson ignored "$ignored" '
+              [inputs | if type == "array" then .[] else . end]
+              | if length == 0 then error("no result in the Snyk output") else .[] end
               | if (.vulnerabilities | type) == "array" then .vulnerabilities[]
                 else error("no vulnerabilities list in the Snyk output") end
               | $ignored[.id] as $until
