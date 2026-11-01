@@ -2,8 +2,8 @@
 
 use crate::binlog::{FailedTest, TestSummary};
 use chrono::{DateTime, FixedOffset};
-use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
+use quick_xml::{Reader, XmlVersion};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -21,7 +21,9 @@ fn extract_attr_value(
             continue;
         }
 
-        if let Ok(value) = attr.decode_and_unescape_value(reader.decoder()) {
+        if let Ok(value) =
+            attr.decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+        {
             return Some(value.into_owned());
         }
     }
@@ -211,8 +213,9 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
         StackTrace,
     }
 
+    // No trim_text: quick-xml trims each text run, which would eat the spaces
+    // around an entity reference. The captured fields are trimmed when stored.
     let mut reader = Reader::from_str(content);
-    reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     let mut summary = TestSummary::default();
     let mut saw_test_run = false;
@@ -293,26 +296,20 @@ fn parse_trx_content(content: &str) -> Option<TestSummary> {
                 }
                 _ => {}
             },
-            Ok(Event::Text(e)) => {
+            Ok(event @ (Event::Text(_) | Event::CData(_) | Event::GeneralRef(_))) => {
                 if !in_failed_result {
                     buf.clear();
                     continue;
                 }
 
-                let text = String::from_utf8_lossy(e.as_ref());
-                match capture_field {
-                    Some(CaptureField::Message) => message_buf.push_str(&text),
-                    Some(CaptureField::StackTrace) => stack_buf.push_str(&text),
-                    None => {}
-                }
-            }
-            Ok(Event::CData(e)) => {
-                if !in_failed_result {
-                    buf.clear();
-                    continue;
-                }
-
-                let text = String::from_utf8_lossy(e.as_ref());
+                let raw = String::from_utf8_lossy(&event);
+                // quick-xml reports `&name;` as its own event between text runs;
+                // rejoin it raw so the captured text keeps its original bytes.
+                let text = if matches!(event, Event::GeneralRef(_)) {
+                    format!("&{raw};")
+                } else {
+                    raw.into_owned()
+                };
                 match capture_field {
                     Some(CaptureField::Message) => message_buf.push_str(&text),
                     Some(CaptureField::StackTrace) => stack_buf.push_str(&text),
@@ -441,6 +438,29 @@ mod tests {
             "MyTests.Calculator.Add_ShouldFail"
         );
         assert!(summary.failed_tests[0].details[0].contains("Expected: 5, Actual: 4"));
+    }
+
+    #[test]
+    fn test_parse_trx_content_keeps_entity_references_in_message() {
+        let trx = r#"<?xml version="1.0" encoding="utf-8"?>
+<TestRun>
+  <Results>
+    <UnitTestResult testName="MyTests.List&lt;int&gt;.Count" outcome="Failed">
+      <Output>
+        <ErrorInfo>
+          <Message>Expected: &lt;5&gt; &amp; Actual: 4</Message>
+        </ErrorInfo>
+      </Output>
+    </UnitTestResult>
+  </Results>
+</TestRun>"#;
+
+        let summary = parse_trx_content(trx).expect("valid TRX");
+        assert_eq!(summary.failed_tests[0].name, "MyTests.List<int>.Count");
+        assert_eq!(
+            summary.failed_tests[0].details,
+            vec!["Expected: &lt;5&gt; &amp; Actual: 4".to_string()]
+        );
     }
 
     #[test]
