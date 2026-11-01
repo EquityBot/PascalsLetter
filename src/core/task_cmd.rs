@@ -534,6 +534,11 @@ fn call_anthropic(
     if let Some(key) = key.as_deref() {
         headers.push(("x-api-key", key));
     }
+    // The daemon lends its relayed credential only to a request carrying this
+    // header, which a web page cannot send to it.
+    if via_daemon {
+        headers.push(("x-rtk-proxy", "1"));
+    }
     // Only the daemon reads this, and only it can price the counterfactual.
     let displaced = via_daemon.then(displaced_model).flatten();
     if let Some(from) = displaced.as_deref() {
@@ -582,6 +587,9 @@ fn call_openai(
     let mut headers: Vec<(&str, &str)> = Vec::new();
     if let Some(auth) = auth.as_deref() {
         headers.push(("Authorization", auth));
+    }
+    if via_daemon {
+        headers.push(("x-rtk-proxy", "1"));
     }
     let displaced = via_daemon.then(displaced_model).flatten();
     if let Some(from) = displaced.as_deref() {
@@ -1167,5 +1175,66 @@ mod borrowed_credential {
             borrowable_api_key(&no_key, true).expect("borrowing tolerates no key"),
             None
         );
+    }
+
+    /// Serves one canned reply on loopback and returns the request it received.
+    fn capture(reply: &'static str) -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                let count = socket.read(&mut buffer).unwrap();
+                request.extend_from_slice(&buffer[..count]);
+                let text = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                let Some(end) = text.find("\r\n\r\n") else {
+                    assert!(count > 0, "request ended before its headers");
+                    continue;
+                };
+                let length = text[..end]
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .map_or(0, |value| value.trim().parse::<usize>().unwrap());
+                if count == 0 || request.len() >= end + 4 + length {
+                    break;
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+                reply.len()
+            );
+            socket.write_all(response.as_bytes()).unwrap();
+            String::from_utf8_lossy(&request).to_ascii_lowercase()
+        });
+        (base, handle)
+    }
+
+    #[test]
+    fn a_worker_routed_through_the_daemon_asks_to_borrow() {
+        let request = WorkerRequest {
+            system: "s".into(),
+            user: "u".into(),
+            max_tokens: 5,
+        };
+        let keyless = |base: &str| UpstreamDef {
+            model: "m".into(),
+            base_url: Some(base.to_string()),
+            api_key_env: Some("RTK_TEST_KEY_THAT_IS_NOT_SET".to_string()),
+            ..UpstreamDef::default()
+        };
+        let (anthropic, seen_anthropic) = capture(r#"{"content":[{"text":"ok"}],"usage":{}}"#);
+        call_anthropic(&keyless(&anthropic), &request, None).expect("anthropic worker");
+        let (openai, seen_openai) =
+            capture(r#"{"choices":[{"message":{"content":"ok"}}],"usage":{}}"#);
+        call_openai(&keyless(&openai), &request, None).expect("openai worker");
+        for seen in [seen_anthropic.join().unwrap(), seen_openai.join().unwrap()] {
+            assert!(
+                seen.contains("\r\nx-rtk-proxy: 1\r\n"),
+                "the daemon lends only to a request with this header: {seen}"
+            );
+        }
     }
 }

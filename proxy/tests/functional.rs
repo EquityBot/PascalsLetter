@@ -258,6 +258,67 @@ async fn state_changing_routes_refuse_a_request_a_browser_could_forge() {
 }
 
 #[tokio::test]
+async fn the_relayed_key_is_lent_only_to_a_local_worker() {
+    let up = upstream().await;
+    let app = build_router(AppState::new(cfg(&up.uri(), false)));
+    let send = |extra: &[(&str, &str)]| {
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/messages")
+            .header("content-type", "text/plain");
+        for (name, value) in extra {
+            request = request.header(*name, *value);
+        }
+        app.clone().oneshot(
+            request
+                .body(axum::body::Body::from(
+                    r#"{"model":"claude-haiku-4-5","max_tokens":5,"messages":[{"role":"user","content":"hi"}]}"#,
+                ))
+                .unwrap(),
+        )
+    };
+    // The agent relays its own key, which the daemon remembers.
+    send(&[("host", "127.0.0.1:8080"), ("x-api-key", "sk-ant-AGENT")])
+        .await
+        .unwrap();
+    // A page's simple cross-origin POST, and a DNS-rebound page that can set
+    // the header but names its own domain.
+    send(&[("host", "127.0.0.1:8080")]).await.unwrap();
+    send(&[("host", "attacker.example:8080"), ("x-rtk-proxy", "1")])
+        .await
+        .unwrap();
+    // `rtk task` routing through the daemon.
+    send(&[("host", "127.0.0.1:8080"), ("x-rtk-proxy", "1")])
+        .await
+        .unwrap();
+
+    let keys: Vec<_> = up
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| {
+            assert!(
+                !r.headers.contains_key("x-rtk-proxy"),
+                "internal header stays local"
+            );
+            r.headers
+                .get("x-api-key")
+                .map(|v| v.to_str().unwrap().to_owned())
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            Some("sk-ant-AGENT".into()),
+            None,
+            None,
+            Some("sk-ant-AGENT".into())
+        ]
+    );
+}
+
+#[tokio::test]
 async fn the_upstream_cannot_be_repointed_over_http() {
     let up = upstream().await;
     let app = build_router(AppState::new(cfg(&up.uri(), false)));

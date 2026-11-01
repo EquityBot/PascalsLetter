@@ -18,7 +18,7 @@ Precedence: **CLI flag > environment variable > config file > default**. Every k
 | `anthropic_upstream` | `RTK_PROXY_ANTHROPIC_UPSTREAM` | `https://api.anthropic.com` | Where `/v1/messages` goes |
 | `openai_upstream` | `RTK_PROXY_OPENAI_UPSTREAM` | `https://api.openai.com` | Where `/v1/chat/completions` goes |
 | `db` | `RTK_PROXY_DB` | `rtk-proxy.db` | Usage store — the database `rtk gain` reads |
-| `relay_borrowing` | `RTK_PROXY_RELAY_BORROWING` | `true` | Lets a pipeline task with no key of its own borrow the credential your agent is already relaying ([Tasks](../pipelines/tasks.md)) |
+| `relay_borrowing` | `RTK_PROXY_RELAY_BORROWING` | `true` | Lets a pipeline task with no key of its own borrow the credential your agent is already relaying ([Tasks](../pipelines/tasks.md)). Only a request carrying the `x-rtk-proxy` header with a `localhost` or IP `Host` borrows, so a web page cannot |
 
 ```bash
 rtk llm-proxy config get
