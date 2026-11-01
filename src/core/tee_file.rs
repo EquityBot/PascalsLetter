@@ -111,7 +111,7 @@ pub(crate) fn get_tee_dir(cfg: &RetrieverConfig) -> Option<PathBuf> {
     super::user_dirs::data().map(|d| d.join("tee"))
 }
 
-fn cleanup_old_files(dir: &Path, max_files: usize) {
+fn cleanup_old_files(dir: &Path, max_files: usize, keep: Option<&Path>) {
     let mut entries: Vec<_> = std::fs::read_dir(dir)
         .ok()
         .into_iter()
@@ -124,7 +124,11 @@ fn cleanup_old_files(dir: &Path, max_files: usize) {
     }
     entries.sort_by_key(|e| e.file_name());
     let to_remove = entries.len() - max_files;
-    for entry in entries.iter().take(to_remove) {
+    for entry in entries
+        .iter()
+        .filter(|entry| Some(entry.path().as_path()) != keep)
+        .take(to_remove)
+    {
         // nosemgrep: filesystem-deletion
         let _ = std::fs::remove_file(entry.path());
     }
@@ -157,15 +161,17 @@ pub(crate) fn write_named_tee_file(
     max_file_size: usize,
     max_files: usize,
 ) -> Option<PathBuf> {
-    create_tee_dir(dir)?;
-    let filepath = dir.join(filename);
+    if max_files == 0 || max_file_size == 0 {
+        return None;
+    }
     let content = if raw.len() > max_file_size {
-        let boundary = raw
-            .char_indices()
-            .take_while(|(i, _)| *i < max_file_size)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(0);
+        let mut boundary = max_file_size;
+        while !raw.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        if boundary == 0 {
+            return None;
+        }
         format!(
             "{}\n\n--- truncated at {} bytes ---",
             &raw[..boundary],
@@ -174,6 +180,8 @@ pub(crate) fn write_named_tee_file(
     } else {
         raw.to_string()
     };
+    create_tee_dir(dir)?;
+    let filepath = dir.join(filename);
     let mut file = crate::core::utils::open_private(
         std::fs::OpenOptions::new()
             .write(true)
@@ -184,7 +192,9 @@ pub(crate) fn write_named_tee_file(
     .ok()?;
     use std::io::Write;
     file.write_all(content.as_bytes()).ok()?;
-    cleanup_old_files(dir, max_files);
+    // A same-second slug or future-dated legacy filename can sort after this
+    // write. Never rotate away the output the returned hint is about to name.
+    cleanup_old_files(dir, max_files, Some(&filepath));
     Some(filepath)
 }
 
@@ -261,18 +271,23 @@ fn write(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<PathBuf> {
     )
 }
 
-pub(crate) fn format_hint(path: &Path) -> String {
-    format!("[full output: {}]", display_shell_path(path))
+pub(crate) fn format_hint(path: &Path, truncated: bool) -> String {
+    let label = if truncated {
+        "partial output (storage limit)"
+    } else {
+        "full output"
+    };
+    format!("[{label}: {}]", display_shell_path(path))
 }
 
 pub fn tee_and_hint(cfg: &RetrieverConfig, raw: &str, slug: &str) -> Option<String> {
     let path = write(cfg, raw, slug)?;
-    Some(format_hint(&path))
+    Some(format_hint(&path, raw.len() > cfg.tee_max_file_size))
 }
 
 pub fn force_tee_hint(cfg: &RetrieverConfig, content: &str, slug: &str) -> Option<String> {
     let path = write(cfg, content, slug)?;
-    Some(format!("[full output: {}]", display_shell_path(&path)))
+    Some(format_hint(&path, content.len() > cfg.tee_max_file_size))
 }
 
 pub fn force_tee_tail_hint(
@@ -282,6 +297,9 @@ pub fn force_tee_tail_hint(
     line_offset: usize,
 ) -> Option<String> {
     let path = write(cfg, content, slug)?;
+    if content.len() > cfg.tee_max_file_size {
+        return Some(format_hint(&path, true));
+    }
     Some(format!(
         "[see remaining: tail -n +{} {}]",
         line_offset,
@@ -323,6 +341,56 @@ mod tests {
         assert!(path.exists());
         let written = fs::read_to_string(&path).unwrap();
         assert!(written.contains("error: test failed"));
+    }
+
+    #[test]
+    fn test_recovery_hint_is_unavailable_with_zero_retention() {
+        let dir = tempfile::tempdir().expect("temporary recovery directory");
+        let cfg = RetrieverConfig {
+            tee_directory: Some(dir.path().join("tee")),
+            tee_max_files: 0,
+            ..RetrieverConfig::default()
+        };
+        assert!(tee_and_hint(&cfg, "diagnostic", "cmd").is_none());
+    }
+
+    #[test]
+    fn test_empty_storage_after_utf8_boundary_emits_no_hint() {
+        let dir = tempfile::tempdir().expect("temporary recovery directory");
+        for cap in [0, 1, 2] {
+            let cfg = RetrieverConfig {
+                tee_directory: Some(dir.path().join("tee")),
+                tee_max_file_size: cap,
+                ..RetrieverConfig::default()
+            };
+            let raw = "漢".repeat(200);
+            assert!(tee_and_hint(&cfg, &raw, "cmd").is_none());
+            assert!(force_tee_hint(&cfg, &raw, "cmd").is_none());
+            assert!(force_tee_tail_hint(&cfg, &raw, "cmd", 2).is_none());
+        }
+    }
+
+    #[test]
+    fn test_forced_recovery_hint_discloses_storage_truncation() {
+        let dir = tempfile::tempdir().expect("temporary recovery directory");
+        let cfg = RetrieverConfig {
+            tee_directory: Some(dir.path().join("tee")),
+            tee_max_file_size: 8,
+            ..RetrieverConfig::default()
+        };
+        for hint in [
+            force_tee_hint(&cfg, "diagnostic\nmissing assertion\n", "cmd"),
+            force_tee_tail_hint(&cfg, "diagnostic\nmissing assertion\n", "cmd", 2),
+        ] {
+            let hint = hint.expect("partial copy is retained");
+            assert!(hint.contains("partial output"), "{hint}");
+            assert!(hint.contains("storage limit"), "{hint}");
+            assert!(!hint.contains("full output"), "{hint}");
+            assert!(
+                !hint.contains("tail -n"),
+                "the tail may not be stored: {hint}"
+            );
+        }
     }
 
     #[test]
@@ -379,7 +447,26 @@ mod tests {
         let path = result.expect("tee file written");
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("--- truncated at 998 bytes ---"));
-        assert!(content.starts_with(&"\u{6F22}".repeat(332)));
+        assert_eq!(
+            content.split("\n\n---").next(),
+            Some("\u{6F22}".repeat(332).as_str())
+        );
+    }
+
+    #[test]
+    fn test_rotation_keeps_the_new_recovery_file() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        fs::write(tmpdir.path().join("9999999999_z.log"), "older run").unwrap();
+        let path = write_named_tee_file(
+            "current diagnostic",
+            "1000000000_a.log",
+            tmpdir.path(),
+            1000,
+            1,
+        )
+        .expect("recovery file");
+        assert_eq!(fs::read_to_string(path).unwrap(), "current diagnostic");
+        assert_eq!(fs::read_dir(tmpdir.path()).unwrap().count(), 1);
     }
 
     #[test]
@@ -390,7 +477,7 @@ mod tests {
             let filename = format!("{:010}_{}.log", 1000000 + i, "test");
             fs::write(dir.join(&filename), "content").unwrap();
         }
-        cleanup_old_files(dir, 20);
+        cleanup_old_files(dir, 20, None);
         let remaining: Vec<_> = fs::read_dir(dir).unwrap().filter_map(|e| e.ok()).collect();
         assert_eq!(remaining.len(), 20);
         for i in 0..5 {

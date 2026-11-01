@@ -21,7 +21,14 @@ fn store_hint(
     exit_code: Option<i32>,
 ) -> Option<String> {
     match retriever::store(cfg, content.as_bytes(), slug, exit_code, 1) {
-        Stored::Saved(s) => Some(format!("[full output: rtk recall {}]", s.hash)),
+        Stored::Saved(s) => {
+            let label = if s.truncated {
+                "partial output (storage limit)"
+            } else {
+                "full output"
+            };
+            Some(format!("[{label}: rtk recall {}]", s.hash))
+        }
         Stored::Unavailable | Stored::Empty => None,
     }
 }
@@ -88,17 +95,29 @@ pub fn force_tee_tail_hint(
         return None;
     }
     let (mode, cfg) = active()?;
+    force_tee_tail_hint_with(mode, &cfg, content, command_slug, line_offset)
+}
+
+fn force_tee_tail_hint_with(
+    mode: RecoveryMode,
+    cfg: &RetrieverConfig,
+    content: &str,
+    command_slug: &str,
+    line_offset: usize,
+) -> Option<String> {
     match mode {
         RecoveryMode::Disabled => None,
         RecoveryMode::Tee => {
-            super::tee_file::force_tee_tail_hint(&cfg, content, command_slug, line_offset)
-                .inspect(|_| retriever::record_tee_elision(&cfg, command_slug))
+            super::tee_file::force_tee_tail_hint(cfg, content, command_slug, line_offset)
+                .inspect(|_| retriever::record_tee_elision(cfg, command_slug))
         }
         RecoveryMode::Sqlite => {
-            match retriever::store(&cfg, content.as_bytes(), command_slug, None, line_offset) {
+            match retriever::store(cfg, content.as_bytes(), command_slug, None, line_offset) {
                 Stored::Saved(s) if s.hidden_lines > 0 => Some(format!(
-                    "[+{} hidden: rtk recall {}]",
-                    s.hidden_lines, s.hash
+                    "[+{} hidden{}: rtk recall {}]",
+                    s.hidden_lines,
+                    if s.truncated { " (storage limit)" } else { "" },
+                    s.hash
                 )),
                 Stored::Saved(_) | Stored::Unavailable | Stored::Empty => None,
             }
@@ -150,7 +169,10 @@ pub fn posthook_tee_hint(config: &Config, raw: &str, command_slug: &str) -> Opti
         config.retriever.tee_max_file_size,
         POSTHOOK_MAX_FILES,
     )?;
-    Some(super::tee_file::format_hint(&path))
+    Some(super::tee_file::format_hint(
+        &path,
+        raw.len() > config.retriever.tee_max_file_size,
+    ))
 }
 
 #[cfg(feature = "engine")]
@@ -344,6 +366,91 @@ mod tests {
         let big = "x".repeat(1000);
         let cfg = RetrieverConfig::default();
         assert!(tee_and_hint_with(RecoveryMode::Sqlite, &cfg, &big, "cmd", 0).is_none());
+    }
+
+    #[test]
+    fn test_recovery_hint_discloses_storage_truncation() {
+        for mode in [RecoveryMode::Sqlite, RecoveryMode::Tee] {
+            let dir = tempfile::tempdir().expect("temporary recovery directory");
+            let cfg = RetrieverConfig {
+                database_path: Some(dir.path().join("recall.db")),
+                tee_directory: Some(dir.path().join("tee")),
+                max_entry_bytes: 32,
+                tee_max_file_size: 32,
+                ..RetrieverConfig::default()
+            };
+            let hint = tee_and_hint_with(mode, &cfg, &"diagnostic\n".repeat(100), "cmd", 17)
+                .expect("a partial copy is retained");
+            assert!(hint.contains("partial output"), "{mode:?}: {hint}");
+            assert!(hint.contains("storage limit"), "{mode:?}: {hint}");
+            assert!(!hint.contains("full output"), "{mode:?}: {hint}");
+        }
+    }
+
+    #[test]
+    fn test_recovery_hint_keeps_full_output_at_exact_cap() {
+        for mode in [RecoveryMode::Sqlite, RecoveryMode::Tee] {
+            let dir = tempfile::tempdir().expect("temporary recovery directory");
+            let cfg = RetrieverConfig {
+                database_path: Some(dir.path().join("recall.db")),
+                tee_directory: Some(dir.path().join("tee")),
+                max_entry_bytes: 500,
+                tee_max_file_size: 500,
+                ..RetrieverConfig::default()
+            };
+            let hint = tee_and_hint_with(mode, &cfg, &"x".repeat(500), "cmd", 17)
+                .expect("the entire output fits");
+            assert!(hint.starts_with("[full output: "), "{mode:?}: {hint}");
+        }
+    }
+
+    #[test]
+    fn test_sqlite_tail_hint_counts_retained_lines_and_discloses_cap() {
+        let dir = tempfile::tempdir().expect("temporary recovery directory");
+        let content = "shown\nhidden1\nhidden2\nhidden3\n";
+        for (cap, prefix) in [
+            (16, "[+2 hidden (storage limit): rtk recall "),
+            (content.len(), "[+3 hidden: rtk recall "),
+        ] {
+            let cfg = RetrieverConfig {
+                database_path: Some(dir.path().join(format!("recall-{cap}.db"))),
+                max_entry_bytes: cap,
+                ..RetrieverConfig::default()
+            };
+            let hint = force_tee_tail_hint_with(RecoveryMode::Sqlite, &cfg, content, "cmd", 2)
+                .expect("hidden lines are retained");
+            assert!(hint.starts_with(prefix), "{hint}");
+        }
+    }
+
+    #[test]
+    fn test_empty_storage_cap_emits_no_recovery_hint() {
+        for mode in [RecoveryMode::Sqlite, RecoveryMode::Tee] {
+            let dir = tempfile::tempdir().expect("temporary recovery directory");
+            let cfg = RetrieverConfig {
+                database_path: Some(dir.path().join("recall.db")),
+                tee_directory: Some(dir.path().join("tee")),
+                max_entry_bytes: 0,
+                tee_max_file_size: 0,
+                ..RetrieverConfig::default()
+            };
+            assert!(tee_and_hint_with(mode, &cfg, &"x".repeat(600), "cmd", 17).is_none());
+        }
+    }
+
+    #[test]
+    fn test_recovery_write_failure_emits_no_hint() {
+        for mode in [RecoveryMode::Sqlite, RecoveryMode::Tee] {
+            let dir = tempfile::tempdir().expect("temporary recovery directory");
+            let blocked = dir.path().join("blocked");
+            std::fs::write(&blocked, "not a directory").expect("blocked parent fixture");
+            let cfg = RetrieverConfig {
+                database_path: Some(blocked.join("recall.db")),
+                tee_directory: Some(blocked.join("tee")),
+                ..RetrieverConfig::default()
+            };
+            assert!(tee_and_hint_with(mode, &cfg, &"x".repeat(600), "cmd", 17).is_none());
+        }
     }
 
     #[test]
