@@ -238,12 +238,15 @@ fn permission_denied_ancestor_does_not_hide_the_failure() {
         fs::create_dir(&denied).unwrap();
         let _restore = RestorePermissions(denied.clone());
         fs::set_permissions(&denied, fs::Permissions::from_mode(0o500)).unwrap();
-        let probe = fs::create_dir(denied.join("probe"));
-        assert_eq!(
-            probe.unwrap_err().kind(),
-            std::io::ErrorKind::PermissionDenied,
-            "requires a user without permission bypass"
-        );
+        match fs::create_dir(denied.join("probe")) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {}
+            Ok(()) => {
+                // Root and other permission-bypass users cannot be denied this way.
+                eprintln!("skipped: this user bypasses directory permissions");
+                return;
+            }
+            Err(e) => panic!("unexpected permission probe failure: {e}"),
+        }
         fixture.store = denied.join("missing/store");
         no_hint(&fixture.failure("err", "PERMISSION_SENTINEL"));
     }
