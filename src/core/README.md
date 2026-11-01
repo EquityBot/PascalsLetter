@@ -208,9 +208,24 @@ Consumers must call `timer.track()` on **all** code paths — success, failure, 
 
 Consumers that parse structured output (JSON, NDJSON, state machines) should call `tee::tee_and_hint()` to persist raw output for LLM recovery on failure. It must be called before `std::process::exit()`.
 
-For truncation recovery on **success** (e.g. a list capped at 20 items), use `tee::force_tee_hint()` (multi-line blocks) or `tee::force_tee_tail_hint(content, slug, offset)` (flat lists). All three persist the full output to the content-addressed recall store ([`retriever.rs`](retriever.rs)) and emit a runnable hint — `[full output: rtk recall <hash>]` or `[+N hidden: rtk recall <hash>]` — instead of burning tokens working around missing data.
+For truncation recovery on **success** (e.g. a list capped at 20 items), use `tee::force_tee_hint()` (multi-line blocks) or `tee::force_tee_tail_hint(content, slug, offset)` (flat lists). All 3 attempt to retain output in the content-addressed recall store ([`retriever.rs`](retriever.rs)). A complete stored copy emits `[full output: rtk recall <hash>]`. A copy limited by the storage cap emits `[partial output (storage limit): rtk recall <hash>]`; tail hints report only the number of stored hidden lines and disclose the storage limit when it applied. Unavailable or disabled storage emits no recovery hint.
 
-The agent runs `rtk recall <hash>` to get back exactly what was elided. For `force_tee_tail_hint`, `offset` is the 1-based first hidden line (`header_lines + MAX_CAP + 1`); it is stored so the default recall returns only the hidden tail. Storage is byte-faithful (`BLOB` + lossless gzip); tune limits via the `[retriever]` config section.
+The agent runs `rtk recall <hash>` to read the retained bytes. For `force_tee_tail_hint`, `offset` is the 1-based first hidden line (`header_lines + MAX_CAP + 1`); it is stored so the default recall returns only the retained hidden tail. Stored bytes are faithful (`BLOB` + lossless gzip), but configured caps, expiry and eviction limit recovery. Tune these limits via `[retriever]`. Legacy tee hints also disclose partial copies; zero-file retention emits no hint.
+
+Linux cross-process qualification is in `cargo test --test recovery_contract_test`.
+It covers streamed `err`, captured `test`, stdout-only failure forwarding, denied
+or unavailable storage, tee rotation and SQLite count/age eviction. Rotation
+preserves the newly written file even when another filename sorts after it.
+SQLite age eviction is triggered by a subsequent write, not by a recall read.
+
+The opt-in full-disk check is
+`cargo test --test recovery_contract_test -- --exact full_filesystem_preserves_all_failure_families --ignored --nocapture`.
+It needs Linux unprivileged user/mount namespaces, `unshare`, `mount` and `timeout`.
+It creates a private 1 MiB tmpfs, proves ENOSPC and checks all 3 failure families
+in both recovery modes. It never fills the host filesystem. Configured Windows
+CLI qualification needs an isolated user/profile or VM: changing `APPDATA` or
+`HOME` does not redirect Windows known-folder configuration. Existing Windows
+unit and quoting tests establish their narrower contracts only.
 
 ### Truncation Caps (`truncate`)
 

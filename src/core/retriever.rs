@@ -69,6 +69,7 @@ impl Default for RetrieverConfig {
 pub struct StoredRef {
     pub hash: String,
     pub hidden_lines: usize,
+    pub truncated: bool,
 }
 
 pub enum Stored {
@@ -488,6 +489,9 @@ pub fn store(
     if content.is_empty() {
         return Stored::Empty;
     }
+    if cfg.max_entry_bytes == 0 {
+        return Stored::Unavailable;
+    }
     match store_inner(cfg, content, command, exit_code, shown_upto.max(1)) {
         Ok(r) => Stored::Saved(r),
         Err(_) => Stored::Unavailable,
@@ -575,6 +579,7 @@ fn store_inner(
         Ok(StoredRef {
             hash: hash.clone(),
             hidden_lines: total_lines.saturating_sub(shown_upto.saturating_sub(1)),
+            truncated,
         })
     })
 }
