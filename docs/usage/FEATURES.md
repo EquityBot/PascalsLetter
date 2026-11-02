@@ -320,6 +320,34 @@ All git subcommands are supported. Unrecognized commands are passed directly to 
 
 ---
 
+### `rtk git ls-tree` -- Paths grouped by directory
+
+```bash
+rtk git ls-tree -r --name-only HEAD
+```
+
+With `--name-only` or `--name-status`, consecutive paths sharing a directory fold
+onto one line, preserving Git's order:
+
+```text
+./ Cargo.toml README.md
+"my file.txt"
+src/cmds/ alpha.rs beta.rs gamma.rs
+src/ lib.rs main.rs
+```
+
+To rebuild Git's original paths, prepend the directory to each name on its line,
+treating `./` as an empty prefix: the path has no directory part in Git's output.
+A path containing spaces stands alone in double quotes. Git's C-quoted paths
+also stand alone, with their escapes preserved.
+
+The default mode/type/object listing, `-l`, `-z`, custom formats, unknown options,
+failed commands, and listings that would not shrink pass through unchanged.
+The hook leaves foldable commands unrewritten before consumers such as `head`,
+`tail`, and `cat`, including when Git global options precede `ls-tree`.
+
+---
+
 ### `rtk git status` -- Compact status
 
 ```bash
@@ -422,7 +450,7 @@ main.rs
   +2 -2
 ```
 
-On a diff this small, rtk saves little. Compression comes from larger diffs, where per-file headers and per-hunk caps matter; truncated output ends with a truncation note and the hint `[full diff: rtk git diff --no-compact]`.
+PascalsLetter shows a diff verbatim up to `[limits] agent_output_max_chars`, so a diff this small passes through unchanged; the compact form above applies only beyond that cap. Compression comes from larger diffs, where per-file headers and per-hunk caps matter; compacted output ends with `[full output: rtk recall <hash>]`, or `[full diff: rtk git diff --no-compact]` when recall cannot store it.
 
 Hunk lines and `@@` headers are printed at column 0, in git's unified form, so `rtk git diff | grep "^-"` works. rtk's own annotations are indented by two spaces so those same greps do not count them: the per-file total (`  +2 -2`) and the truncation note (`  ... (30 deletions, 20 additions truncated)`).
 
@@ -1315,7 +1343,7 @@ rtk verify
 | `git status/diff/log/add/commit/push/pull` | `rtk git ...` |
 | `gh pr/issue/run` | `rtk gh ...` |
 | `cargo test/build/clippy/check` | `rtk cargo ...` |
-| `cat/head/tail <file>` | `rtk read <file>` |
+| `cat/head <file>`, `tail -n <N> <file>` | `rtk read <file>` |
 | `rg/grep <pattern>` | `rtk grep <pattern>` |
 | `ast-grep run -p <pattern>` | `rtk ast-grep run -p <pattern>` |
 | `ls` | `rtk ls` |
@@ -1353,6 +1381,55 @@ Before comparing, RTK strips the wrapper, interpreter or path, so `"playwright"`
 `playwright test` as well as `npx playwright test` or `pnpm exec playwright test`, and `"pytest"` also covers
 `python3 -m pytest tests/`. Arguments are kept: `"^ls$"` excludes bare `ls` without
 also matching `ls -la`.
+
+### Unambiguously-fish scripts
+
+Some hosts evaluate the command string with a POSIX-compatible layer even when
+the user's shell is fish: a multi-line fish script (`if ... end`, `; and`,
+`; or`) then fails to parse before RTK even starts. The hook detects
+**unambiguous** scripts (a fish-only keyword such as `end`, `begin`, `switch`,
+`and`, `or`, `not` at command position, with no POSIX `then`/`fi`/`do`/`done`
+marker) and hands them back for explicit fish execution:
+
+```
+if test -d src\n  git status\nend
+-> rtk run --shell fish -c 'if test -d src\n  git status\nend'
+
+git diff HEAD~3 HEAD; and true
+-> rtk run --shell fish -c 'rtk git diff HEAD~3 HEAD; and true'
+```
+
+Key points:
+
+- **Off by default.** Turn it on with `wrap_fish_scripts = true` under
+  `[hooks]`.
+- **What turning it on costs.** The script reaches Claude Code's approval
+  prompt as a single `rtk run` command, so the prompt — and every permission
+  rule — sees that command, not the script's own. RTK therefore marks every
+  wrap as an explicit *ask*, and withholds it entirely when it can see any
+  `deny` rule, or when a settings file it reads is unparsable or unreadable.
+  Some rule sources never reach the hook at all: `--settings`,
+  `--disallowedTools`, managed settings, and the project directory the agent
+  has `cd`'d away from. A rule in one of those becomes an approval prompt
+  instead of a refusal.
+- **It happens only on `rtk hook claude`, and only when every Claude Code
+  settings file RTK reads parsed and none of them has a `deny` rule.** Once a
+  script reaches a fish, RTK can no longer say which commands run: fish starts
+  one where bash has no grammar at all, and resolves words at run time. Every
+  other host, every rules-only agent and `rtk rewrite` keep the behaviour they
+  had without this feature.
+- The script's own commands go through the ordinary rewrite rules first, so
+  wrapping costs no savings. A *multi-line* block opened by
+  `if`/`for`/`while`/`switch` is carried through unrewritten, as the rewrite
+  rules leave such blocks alone; a single-line `if ...; ...; end` is rewritten
+  like any other chain.
+- Requires a resolvable `fish` binary; disabled on Windows.
+- Also left alone — and so following the usual path, rewrite rules included:
+  ambiguous or POSIX scripts; those RTK cannot decompose for the permission
+  check (command substitution, including fish's own `(cmd)`, and a redirect to
+  a file — so `for f in (ls) ... end`); those containing `\\` or `\'` (fish and
+  POSIX single quotes disagree); and fish's `&|` pipe, which the rewrite cannot
+  re-emit in a form fish accepts.
 
 ---
 
@@ -1400,6 +1477,7 @@ enabled = false             # Anonymous telemetry (1 ping/day, requires consent)
 
 [hooks]
 exclude_commands = []       # Commands excluded from automatic rewriting
+wrap_fish_scripts = false   # Opt in to handing a fish script back as `rtk run --shell fish -c`
 ```
 
 ### Environment variables

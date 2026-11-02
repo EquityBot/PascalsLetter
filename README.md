@@ -17,7 +17,7 @@
 
 </div>
 
-PascalsLetter is EquityBot's distribution of [RTK](https://github.com/rtk-ai/rtk), the Rust Token Killer. RTK filters and compresses command output before it reaches your coding agent's context: one Rust binary, more than 100 supported commands. PascalsLetter is based on upstream RTK as of 11 October 2026 and adds fixes where compression lost or mangled output an agent needed, several of them on Windows. It installs a binary named `rtk`, so hooks, agent configuration and every `rtk` command work unchanged.
+PascalsLetter is EquityBot's distribution of [RTK](https://github.com/rtk-ai/rtk), the Rust Token Killer. RTK filters and compresses command output before it reaches your coding agent's context: one Rust binary, more than 100 supported commands. PascalsLetter is based on upstream RTK as of 2 November 2026 and adds fixes where compression lost or mangled output an agent needed, several of them on Windows. It installs a binary named `rtk`, so hooks, agent configuration and every `rtk` command work unchanged.
 
 ## Install
 
@@ -174,6 +174,22 @@ rtk bypass <cmd>       # run one command unfiltered, still tracked
 ```
 
 > Every command and its filter: **[What RTK Optimizes](docs/guide/resources/what-rtk-covers.md)**
+
+### Escape hatches
+
+`rtk` filters command output by default. When a result looks wrong, bypass the filter for one command to see the raw output and tell a filter bug apart from the real thing:
+
+```bash
+rtk bypass git log --oneline -20        # full git log, no truncation
+rtk bypass npm install express          # raw npm output, no filtering
+rtk bypass curl https://api.example.com/data
+```
+
+- **What it does**: runs one command unfiltered and still tracks it — bypassed commands appear in `rtk gain --history` with 0% bash output reduction.
+- **When to use it**: an output looks off and you need to know whether the filter or the command produced it, when debugging a filter, or for an edge case a filter mishandles.
+- `rtk proxy <cmd>` is a deprecated alias of `rtk bypass <cmd>`.
+
+> **Not the same thing as `rtk llm-proxy`.** `rtk bypass` runs one local command unfiltered. `rtk llm-proxy` manages the `rtk-proxy` daemon, which compresses your agent's provider-API traffic — see [RTK Proxy](#rtk-proxy-optional).
 
 ### Measure It
 

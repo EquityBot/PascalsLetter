@@ -72,11 +72,11 @@ fn ranges_default_to_the_first_line_and_number_original_lines() {
 
     let output = from_stdin(input, &["--from", "2", "--lines", "2", "-n"]);
     assert!(output.status.success(), "{:?}", output.stderr);
-    assert_eq!(output.stdout, "2 │ two\n3 │ three\n".as_bytes());
+    assert_eq!(output.stdout, "2\ttwo\n3\tthree\n".as_bytes());
 
     let output = from_stdin(b"\xff\nvalid\n\xfe", &["--from", "2", "--lines", "1", "-n"]);
     assert!(output.status.success(), "{:?}", output.stderr);
-    assert_eq!(output.stdout, "2 │ valid\n".as_bytes());
+    assert_eq!(output.stdout, "2\tvalid\n".as_bytes());
 
     let output = from_stdin(b"skip\n\xff\n", &["--from", "2", "--lines", "1", "-n"]);
     assert_eq!(output.status.code(), Some(1));
