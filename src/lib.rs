@@ -1400,6 +1400,12 @@ enum GitCommands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// List tree entries; plain path lists are folded by directory
+    LsTree {
+        /// Git ls-tree arguments (tree-ish, paths, flags)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Passthrough: runs any unsupported git subcommand directly
     #[command(external_subcommand)]
     Other(Vec<OsString>),
@@ -2386,7 +2392,7 @@ fn uninstall_init_dispatch<UninstallHermes, UninstallStandard>(
     ctx: hooks::init::InitContext,
     uninstall_hermes: UninstallHermes,
     uninstall_standard: UninstallStandard,
-) -> Result<()>
+) -> Result<i32>
 where
     UninstallHermes: FnOnce(hooks::init::InitContext) -> Result<()>,
     UninstallStandard: FnOnce(
@@ -2398,18 +2404,23 @@ where
         bool,
         hooks::init::PatchMode,
         hooks::init::InitContext,
-    ) -> Result<()>,
+    ) -> Result<i32>,
 {
     if agent == Some(AgentTarget::Hermes) {
-        uninstall_hermes(ctx)
+        uninstall_hermes(ctx)?;
+        Ok(0)
     } else if agent == Some(AgentTarget::Trae) {
-        hooks::init::uninstall_trae_mode(global, ctx)
+        hooks::init::uninstall_trae_mode(global, ctx)?;
+        Ok(0)
     } else if agent == Some(AgentTarget::Antigravity) {
-        hooks::init::uninstall_antigravity_mode(global, ctx)
+        hooks::init::uninstall_antigravity_mode(global, ctx)?;
+        Ok(0)
     } else if agent == Some(AgentTarget::Droid) {
-        hooks::init::uninstall_droid(global, ctx)
+        hooks::init::uninstall_droid(global, ctx)?;
+        Ok(0)
     } else if agent == Some(AgentTarget::Vibe) {
-        hooks::init::uninstall_vibe(ctx)
+        hooks::init::uninstall_vibe(ctx)?;
+        Ok(0)
     } else {
         let cursor = agent == Some(AgentTarget::Cursor);
         let pi = agent == Some(AgentTarget::Pi);
@@ -2778,6 +2789,13 @@ fn run_cli() -> Result<i32> {
                 GitCommands::Other(args) => {
                     git_cmd::run_passthrough(&args, &global_args, cli.verbose)?
                 }
+                GitCommands::LsTree { args } => git_cmd::run(
+                    git_cmd::GitCommand::LsTree,
+                    &args,
+                    None,
+                    cli.verbose,
+                    &global_args,
+                )?,
             }
         }
 
@@ -3089,7 +3107,7 @@ fn run_cli() -> Result<i32> {
                     hooks::init::uninstall_copilot(ctx)?;
                 }
             } else if uninstall {
-                uninstall_init_dispatch(
+                return uninstall_init_dispatch(
                     agent,
                     global,
                     gemini,
@@ -3098,7 +3116,7 @@ fn run_cli() -> Result<i32> {
                     ctx,
                     hooks::init::uninstall_hermes,
                     hooks::init::uninstall_with_patch_mode,
-                )?;
+                );
             } else if gemini {
                 hooks::init::run_gemini(global, hook_only, patch_mode, ctx)?;
             } else if copilot {
@@ -3756,7 +3774,8 @@ fn run_cli() -> Result<i32> {
                     return Ok(2);
                 };
                 match path.decide(&raw) {
-                    HookDecision::AllowRewrite(rewritten) | HookDecision::AskRewrite(rewritten) => {
+                    HookDecision::AllowRewrite(rewritten)
+                    | HookDecision::AskRewrite(rewritten, _) => {
                         println!("{}", rewritten);
                         0
                     }
@@ -4496,7 +4515,7 @@ mod tests {
             },
             |_, _, _, _, _, _, _, _| {
                 standard_called.set(true);
-                Ok(())
+                Ok(0)
             },
         );
 
@@ -4557,7 +4576,7 @@ mod tests {
                 assert!(global);
                 assert!(omp);
                 assert_eq!(patch_mode, hooks::init::PatchMode::Auto);
-                Ok(())
+                Ok(0)
             },
         );
 

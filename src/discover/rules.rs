@@ -61,7 +61,7 @@ pub const RULES: &[RtkRule] = &[
         // yadm stays out of this rule: `rtk git` would run git on the current
         // project, not yadm's dotfiles repository. Change adapted from
         // kylehgc/rtk 1d672725 by RawNuke (Apache-2.0); see rtk-ai/rtk#3408.
-        pattern: r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree)(?:\s|$|[;|&()<>])",
+        pattern: r"^git\s+(?:-[Cc]\s+\S+\s+)*(status|log|diff|show|add|commit|checkout|push|pull|branch|fetch|stash|worktree|ls-tree)(?:\s|$|[;|&()<>])",
         rtk_cmd: "rtk git",
         pipeline_safety: PipelineSafety::ProducerOnly,
         rewrite_prefixes: &["git"],
@@ -72,6 +72,7 @@ pub const RULES: &[RtkRule] = &[
             ("show", 80.0),
             ("add", 59.0),
             ("commit", 59.0),
+            ("ls-tree", 37.0),
         ],
         ..RtkRule::DEFAULT
     },
