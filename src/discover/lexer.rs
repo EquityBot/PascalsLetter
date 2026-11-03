@@ -636,6 +636,14 @@ fn contains_substitution(cmd: &str) -> bool {
     false
 }
 
+/// True for a heredoc or here-string redirect (`<<`, `<<-`, `<<<`), with or
+/// without the descriptor the tokenizer folds into it (`3<<EOF`, `0<<-EOF`).
+pub(crate) fn is_heredoc_redirect(value: &str) -> bool {
+    value
+        .trim_start_matches(|c: char| c.is_ascii_digit())
+        .starts_with("<<")
+}
+
 /// Grammar that can open a command without being part of it, so it does not
 /// count as command text: a redirect behind one is still a leading redirect.
 fn is_grammar_word(value: &str) -> bool {
@@ -1482,6 +1490,25 @@ mod tests {
                 .iter()
                 .any(|t| t.kind == TokenKind::Redirect && t.value == "<<")
         );
+    }
+
+    #[test]
+    fn test_heredoc_redirect_with_a_descriptor() {
+        for (cmd, heredoc) in [
+            ("cat <<EOF", true),
+            ("cat 3<<EOF", true),
+            ("cat 0<<-EOF", true),
+            ("cat 12<<<word", true),
+            ("cat < in.txt", false),
+            ("cat 3< in.txt", false),
+            ("cat <&3", false),
+            ("cat 3> out.txt", false),
+        ] {
+            let found = tokenize(cmd)
+                .iter()
+                .any(|t| t.kind == TokenKind::Redirect && is_heredoc_redirect(&t.value));
+            assert_eq!(found, heredoc, "{cmd:?}");
+        }
     }
 
     #[test]

@@ -46,7 +46,11 @@ const REDIRECTS: &[&str] = &[
     " &> all.log",
 ];
 
-const OPERATORS: &[&str] = &[" && ", " || ", " ; ", " | ", " |& ", " & "];
+/// `&!` and `&|` are one operator to zsh (and `&|` to fish) but two tokens to
+/// the lexer; glued or spaced, a rewrite must keep both.
+const OPERATORS: &[&str] = &[
+    " && ", " || ", " ; ", " | ", " |& ", " & ", " &! ", " &!", " &| ", " &|",
+];
 
 /// The non-word tokens of `cmd`, in order.
 fn structure(cmd: &str) -> Vec<(TokenKind, String)> {

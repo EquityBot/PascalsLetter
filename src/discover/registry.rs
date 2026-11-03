@@ -8,8 +8,9 @@ use std::sync::{LazyLock, OnceLock};
 
 use super::lexer::{
     ParsedToken, PipeKind, QuoteScan, TokenKind, advance_quote_state, ansi_c_quote_defeats_lexer,
-    coalesce_words, contains_unattestable_construct_in, is_crlf_at, is_word_boundary_whitespace,
-    redirect_has_file_target, shell_split, split_on_operators, tokenize, tokenize_with_newlines,
+    coalesce_words, contains_unattestable_construct_in, is_crlf_at, is_heredoc_redirect,
+    is_word_boundary_whitespace, redirect_has_file_target, shell_split, split_on_operators,
+    tokenize, tokenize_with_newlines,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use super::shell_wrapper::parse_shell_wrapper;
@@ -357,7 +358,7 @@ fn extract_base_command(cmd: &str) -> &str {
 pub fn has_heredoc(cmd: &str) -> bool {
     tokenize(cmd)
         .iter()
-        .any(|t| t.kind == TokenKind::Redirect && t.value.starts_with("<<"))
+        .any(|t| t.kind == TokenKind::Redirect && is_heredoc_redirect(&t.value))
 }
 
 pub fn split_command_chain(cmd: &str) -> Vec<&str> {
@@ -4841,6 +4842,21 @@ mod tests {
             rewrite_command_no_prefixes("cat <<'EOF'\nfoo\nEOF", &[]),
             None
         );
+    }
+
+    /// A descriptor before `<<` (folded into the redirect token) still opens a heredoc,
+    /// whose body is data: rewriting `git status` inside it changes what the command reads.
+    #[test]
+    fn test_rewrite_fd_heredoc_returns_none() {
+        for cmd in [
+            "cat 3<<EOF\ngit status && git log\nEOF",
+            "cat 0<<-EOF\n\tgit status && git log\n\tEOF",
+            "git status && cat 3<<EOF\ngit log; git diff\nEOF",
+        ] {
+            assert!(has_heredoc(cmd), "{cmd:?}");
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+            assert_eq!(split_command_chain(cmd), vec![cmd], "{cmd:?}");
+        }
     }
 
     #[test]
