@@ -406,8 +406,13 @@ fn normalize_php_tool_command_with_dirs(cmd: &str, bin_dirs: &[std::path::PathBu
 fn normalize_php_tool_word<'a>(word: &str, bin_dirs: &'a [std::path::PathBuf]) -> Option<&'a str> {
     // A path the shell expands (`$ROOT/vendor/bin/phpunit`, `~/x/vendor/bin/pint`, a glob)
     // or that holds shell syntax (`a!/vendor/bin/pint`) names a copy of the tool elsewhere;
-    // reducing it to the bare tool would run the current project's copy.
-    if word.contains(['$', '`', '~', '*', '?', '[', '!', '(', ')', '{', '}']) {
+    // reducing it to the bare tool would run the current project's copy. A redirect or
+    // operator inside the word (`a/>o/vendor/bin/pint` runs `a/` with stdout to a file)
+    // would be dropped with the path, and `#a/vendor/bin/pint` (a comment) or
+    // `X=a/vendor/bin/pint` (an assignment) runs nothing at all.
+    if word.contains([
+        '$', '`', '~', '*', '?', '[', '!', '(', ')', '{', '}', '<', '>', '&', '|', ';', '#', '=',
+    ]) {
         return None;
     }
     let normalized_word = normalize_php_tool_path(word);
@@ -8640,6 +8645,11 @@ mod tests {
                 "$ROOT/vendor/bin/phpunit",
             ),
             ("a!/vendor/bin/pint; ls", "a!/vendor/bin/pint"),
+            // Found by fuzz/fuzz_targets/rewrite.rs: the redirects went with the path.
+            ("a/>o/vendor/bin/pint --test", "a/>o/vendor/bin/pint"),
+            ("a/>&-<o/vendor/bin/ecs", "a/>&-<o/vendor/bin/ecs"),
+            ("#a/vendor/bin/pint --test", "#a/vendor/bin/pint"),
+            ("X=a/vendor/bin/pint", "X=a/vendor/bin/pint"),
             ("~/tools/vendor/bin/pint --test", "~/tools/vendor/bin/pint"),
             ("*/vendor/bin/phpunit tests/", "*/vendor/bin/phpunit"),
         ] {
