@@ -39,6 +39,49 @@ fn read_lines_lossy(reader: impl Read) -> impl Iterator<Item = String> {
     })
 }
 
+/// What a terminal shows for `text`, for filters to parse: a lone `\r` goes back to the start of
+/// the line and `\b` back one character, and each later character overwrites the one there
+/// (progress bars and spinners redraw this way). `\r\n` endings are kept, and text with neither
+/// control is returned as it is. Only filter input is collapsed: raw output, the tee and
+/// `rtk recall` keep the exact bytes. ANSI cursor sequences such as `ESC [K` are not interpreted.
+pub(crate) fn collapse_terminal_control(text: &str) -> Cow<'_, str> {
+    let bytes = text.as_bytes();
+    let lone_cr = |(i, _): (usize, &str)| bytes.get(i + 1) != Some(&b'\n');
+    if !text.contains('\u{8}') && !text.match_indices('\r').any(lone_cr) {
+        return Cow::Borrowed(text);
+    }
+    let mut visible = String::with_capacity(text.len());
+    let mut line: Vec<char> = Vec::new();
+    let mut cursor = 0usize;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' if chars.peek() == Some(&'\n') => {
+                chars.next();
+                visible.extend(line.drain(..));
+                visible.push_str("\r\n");
+                cursor = 0;
+            }
+            '\n' => {
+                visible.extend(line.drain(..));
+                visible.push('\n');
+                cursor = 0;
+            }
+            '\r' => cursor = 0,
+            '\u{8}' => cursor = cursor.saturating_sub(1),
+            ch => {
+                match line.get_mut(cursor) {
+                    Some(slot) => *slot = ch,
+                    None => line.push(ch),
+                }
+                cursor += 1;
+            }
+        }
+    }
+    visible.extend(line);
+    Cow::Owned(visible)
+}
+
 pub trait StreamFilter {
     fn feed_line(&mut self, line: &str) -> Option<String>;
     fn flush(&mut self) -> String;
@@ -562,7 +605,7 @@ pub fn run_streaming(
                     }
                 }
                 filter_fd_is_stderr = is_stderr;
-                if let Some(output) = filter.feed_line(&line) {
+                if let Some(output) = filter.feed_line(&collapse_terminal_control(&line)) {
                     filtered.push_str(&output);
                     let dest: &mut dyn Write = if is_stderr { &mut err_out } else { &mut out };
                     match write!(dest, "{}", output) {
@@ -624,7 +667,7 @@ pub fn run_streaming(
                         }
                     }
                     filtered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        filter_fn(&raw_stdout)
+                        filter_fn(&collapse_terminal_control(&raw_stdout))
                     }))
                     .unwrap_or_else(|_| {
                         eprintln!("[rtk] warning: filter panicked — passing through raw output");
@@ -1077,6 +1120,40 @@ pub(crate) mod tests {
         assert!(!result.filtered.contains('b'));
         assert!(result.filtered.contains('c'));
         assert_eq!(result.exit_code, 0);
+    }
+
+    #[test]
+    fn test_collapse_terminal_control_shows_what_a_terminal_shows() {
+        let cases = [
+            ("Downloading 0%\rDownloading 3%\n", "Downloading 3%\n"),
+            ("abc\u{8}D\n", "abD\n"),
+            ("abcdef\rxy", "xycdef"),
+            ("\u{8}\u{8}a", "a"),
+            ("x\r\n10%\r20%\r\n", "x\r\n20%\r\n"),
+        ];
+        for (text, shown) in cases {
+            assert_eq!(collapse_terminal_control(text), shown, "{text:?}");
+        }
+        for text in ["plain\n", "a\r\nb\r\n", ""] {
+            assert!(matches!(collapse_terminal_control(text), Cow::Borrowed(t) if t == text));
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_run_streaming_filters_see_redraws_collapsed_and_raw_keeps_them() {
+        let streamed = LineFilter::new(|l| Some(format!("{}\n", l)));
+        let buffered: Box<dyn Fn(&str) -> String> = Box::new(|s: &str| s.to_string());
+        for mode in [
+            FilterMode::Streaming(Box::new(streamed)),
+            FilterMode::Buffered(buffered),
+        ] {
+            let mut cmd = Command::new("printf");
+            cmd.arg("step 1\rstep 2\n");
+            let result = run_streaming(&mut cmd, StdinMode::Null, mode).unwrap();
+            assert_eq!(result.filtered, "step 2\n");
+            assert_eq!(result.raw_stdout, "step 1\rstep 2\n");
+        }
     }
 
     #[cfg(not(windows))]
