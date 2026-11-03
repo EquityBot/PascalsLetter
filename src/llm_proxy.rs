@@ -542,12 +542,20 @@ pub fn is_rtk_proxy_at(addr: &str, timeout: Duration) -> bool {
 }
 
 fn health_check_with_timeout(bind: &str, timeout: Duration) -> bool {
-    ureq::get(&format!("http://{bind}/health"))
-        .timeout(timeout)
-        .call()
-        .ok()
-        .and_then(|resp| resp.into_string().ok())
-        .is_some_and(|body| is_rtk_proxy_health(&body))
+    // shortcut: ureq 2 buffers a short body with `read_exact(..).expect(..)`
+    // (ureq-2.12.1 src/response.rs:401-403), which panics on macOS when a server
+    // answers and hangs up before reading the request (rtk-ai/rtk#4912). Such a
+    // server is not ours, so the panic reads as `false`; its message still reaches
+    // stderr. Reading the body without that path would remove it.
+    std::panic::catch_unwind(|| {
+        ureq::get(&format!("http://{bind}/health"))
+            .timeout(timeout)
+            .call()
+            .ok()
+            .and_then(|resp| resp.into_string().ok())
+            .is_some_and(|body| is_rtk_proxy_health(&body))
+    })
+    .unwrap_or(false)
 }
 
 /// Whether a `/health` body identifies the rtk daemon. Anything else on the
