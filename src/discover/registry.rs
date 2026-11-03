@@ -408,9 +408,10 @@ fn normalize_php_tool_word<'a>(word: &str, bin_dirs: &'a [std::path::PathBuf]) -
     // or that holds shell syntax (`a!/vendor/bin/pint`) names a copy of the tool elsewhere;
     // reducing it to the bare tool would run the current project's copy. A redirect or
     // operator inside the word (`a/>o/vendor/bin/pint` runs `a/` with stdout to a file)
-    // would be dropped with the path.
+    // would be dropped with the path, and `#a/vendor/bin/pint` (a comment) or
+    // `X=a/vendor/bin/pint` (an assignment) runs nothing at all.
     if word.contains([
-        '$', '`', '~', '*', '?', '[', '!', '(', ')', '{', '}', '<', '>', '&', '|', ';',
+        '$', '`', '~', '*', '?', '[', '!', '(', ')', '{', '}', '<', '>', '&', '|', ';', '#', '=',
     ]) {
         return None;
     }
@@ -8647,6 +8648,8 @@ mod tests {
             // Found by fuzz/fuzz_targets/rewrite.rs: the redirects went with the path.
             ("a/>o/vendor/bin/pint --test", "a/>o/vendor/bin/pint"),
             ("a/>&-<o/vendor/bin/ecs", "a/>&-<o/vendor/bin/ecs"),
+            ("#a/vendor/bin/pint --test", "#a/vendor/bin/pint"),
+            ("X=a/vendor/bin/pint", "X=a/vendor/bin/pint"),
             ("~/tools/vendor/bin/pint --test", "~/tools/vendor/bin/pint"),
             ("*/vendor/bin/phpunit tests/", "*/vendor/bin/phpunit"),
         ] {
