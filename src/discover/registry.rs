@@ -783,7 +783,7 @@ fn line_continuations(s: &str, track_quotes: bool) -> Vec<Continuation> {
                 continue;
             }
             b'`' if quote == Some('"') => after_substitution = true,
-            b'$' if quote == Some('"') && bytes.get(i + 1) == Some(&b'(') => {
+            b'$' if quote == Some('"') && byte_after_joins(bytes, i + 1) == Some(b'(') => {
                 after_substitution = true;
             }
             b @ (b'\'' | b'"') if track_quotes => quote = advance_quote_state(quote, b as char),
@@ -792,6 +792,15 @@ fn line_continuations(s: &str, track_quotes: bool) -> Vec<Continuation> {
         i += 1;
     }
     found
+}
+
+/// The byte bash reads at `i` once it has removed the `\<NL>`s there, so that
+/// `$\<NL>(` still opens a substitution.
+fn byte_after_joins(bytes: &[u8], mut i: usize) -> Option<u8> {
+    while bytes.get(i) == Some(&b'\\') && bytes.get(i + 1) == Some(&b'\n') {
+        i += 2;
+    }
+    bytes.get(i).copied()
 }
 
 /// True when [`collapse_line_continuations`] cannot tell what bash removes: a
@@ -8710,6 +8719,7 @@ mod tests {
             "git status \"`echo 'x\\\ny'`\"",
             "cat \"$(printf \"%s\" 'a\\\nb')\"",
             "cat \"$(echo \"'\")\" 'a\\\nb'",
+            "cat \"$\\\n(printf 'a\\\nb')\"",
         ] {
             assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
         }
