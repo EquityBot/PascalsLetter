@@ -1,7 +1,11 @@
 mod analytics;
 mod cmds;
 mod core;
+#[cfg(not(fuzzing))]
 mod discover;
+// fuzz/ calls the rewriter and lexer directly; cargo-fuzz builds with --cfg fuzzing.
+#[cfg(fuzzing)]
+pub mod discover;
 #[cfg(feature = "example-plugins")]
 mod example_plugins;
 mod hooks;

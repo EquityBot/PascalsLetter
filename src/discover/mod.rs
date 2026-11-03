@@ -5,6 +5,8 @@ pub mod lexer;
 pub mod provider;
 pub mod registry;
 mod report;
+#[cfg(test)]
+mod rewrite_properties;
 pub mod rules;
 pub(crate) mod shell_wrapper;
 
