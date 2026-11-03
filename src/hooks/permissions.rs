@@ -2437,6 +2437,24 @@ mod tests {
     }
 
     #[test]
+    fn test_continuation_inside_a_word_is_joined_before_the_wrapper_check() {
+        // The inner bash runs `git pu\<NL>sh` as `git push`; collapsing the
+        // continuation to a space made the wrapper check see `git pu sh`.
+        let deny = vec!["git push:*".to_string()];
+        let allow = vec!["*".to_string()];
+        for cmd in [
+            "bash -c 'git pu\\\nsh'",
+            "bash -c 'git status; git pu\\\nsh origin'",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &allow),
+                PermissionVerdict::Defer,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_line_continuation_is_joined_before_the_wrapper_check() {
         let deny = vec!["git push:*".to_string()];
         let allow = vec!["*".to_string()];

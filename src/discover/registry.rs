@@ -737,21 +737,33 @@ fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
 
 /// Matches a bash line-continuation: a backslash immediately followed by
 /// `\n` or `\r\n`, *plus* any horizontal whitespace on the line before AND
-/// after the break. This is what bash already collapses to a single space
-/// before executing the command — rtk's hook matcher needs to do the same
-/// so commands authored across multiple lines still hit the rewrite rules.
-/// Consuming the trailing whitespace prevents double spaces in cases like
+/// after the break, so commands authored across multiple lines still hit the
+/// rewrite rules. Consuming the whitespace prevents double spaces in cases like
 /// `git diff \<NL>HEAD~1`.
 static LINE_CONTINUATION_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)[ \t\x0B\x0C]*\\\r?\n[ \t\x0B\x0C]*").unwrap());
 
 static BASH_JOIN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\\r?\n").unwrap());
 
-/// Replace every bash line continuation with a single space, mirroring what
-/// bash does before dispatching the command. Returns a borrowed `&str` when the
-/// input contains no continuations, so the common fast path allocates nothing.
+/// Remove every bash line continuation as bash does before dispatching the
+/// command. Bash deletes `\<NL>` outright, so one inside a word joins it
+/// (`git sta\<NL>tus` runs `git status`); one with whitespace beside it becomes
+/// a single space. A backslash that is itself escaped (`\\<NL>`) is no
+/// continuation: the newline ends the command. Returns a borrowed `&str` when
+/// the input contains no continuations, so the common fast path allocates nothing.
 pub(crate) fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
-    LINE_CONTINUATION_RE.replace_all(s, " ")
+    LINE_CONTINUATION_RE.replace_all(s, |caps: &regex::Captures<'_>| {
+        let m = caps.get(0).expect("group 0 always matches");
+        let text = m.as_str();
+        let backslashes_before = s[..m.start()].bytes().rev().take_while(|&b| b == b'\\');
+        if text.starts_with('\\') && backslashes_before.count() % 2 == 1 {
+            text.to_string()
+        } else if text.starts_with('\\') && text.ends_with('\n') {
+            String::new()
+        } else {
+            " ".to_string()
+        }
+    })
 }
 
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
@@ -8545,6 +8557,25 @@ mod tests {
             rewrite_command_no_prefixes("git \\\n    diff HEAD~1", &[]),
             Some("rtk git diff HEAD~1".into())
         );
+    }
+
+    #[test]
+    fn test_rewrite_joins_a_continuation_inside_a_word() {
+        // Bash deletes `\<NL>`, so one inside a word joins it: `git sta\<NL>tus`
+        // runs `git status`, and `tsc\<NL>d` runs `tscd`, not `tsc d`.
+        assert_eq!(
+            rewrite_command_no_prefixes("git sta\\\ntus", &[]),
+            Some("rtk git status".into())
+        );
+        assert_eq!(rewrite_command_no_prefixes("tsc\\\nd", &[]), None);
+    }
+
+    #[test]
+    fn test_escaped_backslash_before_a_newline_is_no_continuation() {
+        // `ls\\<NL>pwd` runs `ls\` and then `pwd`; a third backslash continues the line.
+        assert_eq!(collapse_line_continuations("ls\\\\\npwd"), "ls\\\\\npwd");
+        assert_eq!(collapse_line_continuations("ls\\\\\\\npwd"), "ls\\\\pwd");
+        assert_eq!(collapse_line_continuations("git \\\n  diff"), "git diff");
     }
 
     #[test]
