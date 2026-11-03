@@ -1,5 +1,11 @@
 # CI/CD Flows
 
+This fork runs pull request checks in `ci.yml` and coverage after pushes to
+`develop` or manual dispatch. The upstream `cd.yml`, `next-release.yml`,
+`release.yml` and `stale.yml` workflows are removed here. The release diagrams
+below remain as upstream reference; they describe no active release automation
+in this fork.
+
 ## PR Quality Gates (ci.yml)
 
 Trigger: pull_request to develop or master
@@ -36,7 +42,7 @@ Trigger: pull_request to develop or master
 
      + DCO check (independent, develop PRs only)
      + Dependabot (weekly: Cargo deps + GitHub Actions)
-     + coverage.yml (also on push to develop: the tests under cargo-llvm-cov, then Codecov)
+     + coverage.yml (push to develop or manual dispatch only: cargo-llvm-cov, then Codecov)
 ```
 
 ## Merge to develop — pre-release (cd.yml)
