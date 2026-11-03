@@ -37,6 +37,7 @@ Each change has a regression test, except `grep_max_results`.
 | Area | Change |
 | --- | --- |
 | Windows arguments | Arguments passed through MSYS keep their exact text: `#\[ignore`, `*.rs`, `{a,b}`, `~` and `don't` are no longer rewritten ([rtk-ai/rtk#4737](https://github.com/rtk-ai/rtk/issues/4737)). |
+| `cargo test` | Compiler warnings on a passing run are shown, and the summary ends `[N compiler warnings]`; they were dropped, and with exit 0 no copy was kept. Ported from [CryptoKrad/rtk](https://github.com/CryptoKrad/rtk/commit/b95acce4841b2ece7f068cce596490ffc7a59739) (Apache-2.0; [rtk-ai/rtk#2877](https://github.com/rtk-ai/rtk/pull/2877)). |
 | `rtk rg` on Windows | A pathless `rtk rg foo` with no piped or redirected stdin keeps every filename, following ripgrep's own stdin rule. |
 | `grep` and `rg` | Output is capped only when that saves at least a third or is the only form under `[limits] agent_output_max_chars`. Long lines are clipped around the match, located in the engine's own pattern dialect. `grep_max_results` is honoured, and a partial `[limits]` table no longer drops the whole config. |
 | `git diff` | Shown verbatim up to `agent_output_max_chars`. Above it, a compacted diff or show ends with `[full output: rtk recall <hash>]`, or `[full diff: rtk git diff --no-compact]` when recall cannot store it. |
@@ -45,7 +46,6 @@ Each change has a regression test, except `grep_max_results`.
 | `yadm` | Removed from the `git` rewrite rule, which would run git on the current project instead of yadm's dotfiles repository. It goes through `rtk yadm`, and `rtk discover` lists it as unhandled, as it does `jq` and other commands with only a TOML filter. From [kylehgc/rtk](https://github.com/kylehgc/rtk/commit/1d672725f8cf9d43da32212310dd7abb5bca814d) by RawNuke (Apache-2.0); see [rtk-ai/rtk#3408](https://github.com/rtk-ai/rtk/issues/3408). |
 | `rtk-proxy` key lending | The relayed provider key is lent only to a keyless request carrying the `x-rtk-proxy` header (which `rtk task` sends) with a `localhost` or IP `Host`, so a web page, including a DNS-rebound one, cannot spend it. |
 | `rtk gain` | The summary, per-command and daily, weekly and monthly tables count an oversised row at a fixed 7,500-token cap, and the headline figure is net. |
-| `cargo test` | Compiler warnings on a passing run are shown, and the summary ends `[N compiler warnings]`; they were dropped, and with exit 0 no copy was kept. Ported from [CryptoKrad/rtk](https://github.com/CryptoKrad/rtk/commit/b95acce4841b2ece7f068cce596490ffc7a59739) (Apache-2.0; [rtk-ai/rtk#2877](https://github.com/rtk-ai/rtk/pull/2877)). |
 
 Generally useful fixes are offered upstream as draft pull requests, listed in [FORKS.md](https://github.com/EquityBot/EquityBot/blob/main/FORKS.md).
 
