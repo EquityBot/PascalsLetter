@@ -749,9 +749,9 @@ static BASH_JOIN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\\r?\n").u
 struct Continuation {
     at: usize,
     in_double: bool,
-    /// Inside double quotes after a `$(` or backtick in them: bash starts new
-    /// quoting inside the substitution, which this scan, like the lexer, does not
-    /// follow, so a `'…'` there may keep its `\<NL>`.
+    /// After a `$(` or backtick inside double quotes: bash starts new quoting
+    /// inside the substitution, which this scan, like the lexer, does not follow,
+    /// so a `'…'` there may keep its `\<NL>`.
     after_substitution: bool,
 }
 
@@ -762,7 +762,11 @@ struct Continuation {
 fn line_continuations(s: &str, track_quotes: bool) -> Vec<Continuation> {
     let bytes = s.as_bytes();
     let mut quote = None;
-    let mut substitution_in_double = false;
+    // shortcut: once set this stays set, since the scan cannot tell where the
+    // substitution ends (its own quotes close and reopen the outer ones), so a
+    // continuation after a finished substitution is refused too. Following
+    // bash's nesting would lift that.
+    let mut after_substitution = false;
     let mut found = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
@@ -772,23 +776,17 @@ fn line_continuations(s: &str, track_quotes: bool) -> Vec<Continuation> {
                     found.push(Continuation {
                         at: i,
                         in_double: quote == Some('"'),
-                        after_substitution: substitution_in_double,
+                        after_substitution,
                     });
                 }
                 i += 2;
                 continue;
             }
-            b'`' if quote == Some('"') => substitution_in_double = true,
+            b'`' if quote == Some('"') => after_substitution = true,
             b'$' if quote == Some('"') && bytes.get(i + 1) == Some(&b'(') => {
-                substitution_in_double = true;
+                after_substitution = true;
             }
-            b @ (b'\'' | b'"') if track_quotes => {
-                let next = advance_quote_state(quote, b as char);
-                if next != quote {
-                    substitution_in_double = false;
-                }
-                quote = next;
-            }
+            b @ (b'\'' | b'"') if track_quotes => quote = advance_quote_state(quote, b as char),
             _ => {}
         }
         i += 1;
@@ -797,7 +795,7 @@ fn line_continuations(s: &str, track_quotes: bool) -> Vec<Continuation> {
 }
 
 /// True when [`collapse_line_continuations`] cannot tell what bash removes: a
-/// continuation inside double quotes after a `$(` or backtick in them.
+/// continuation after a `$(` or backtick inside double quotes.
 fn line_continuation_quoting_unknown(s: &str) -> bool {
     s.contains('\\')
         && line_continuations(s, true)
@@ -8705,10 +8703,13 @@ mod tests {
             "{out:?}"
         );
         // Inside `"$(…)"` bash starts new quoting, which the scan cannot follow, so
-        // such a command runs as written.
+        // such a command runs as written, even when quotes inside the substitution
+        // close and reopen the outer ones.
         for cmd in [
             "cat \"$(printf 'a\\\nb')\"",
             "git status \"`echo 'x\\\ny'`\"",
+            "cat \"$(printf \"%s\" 'a\\\nb')\"",
+            "cat \"$(echo \"'\")\" 'a\\\nb'",
         ] {
             assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
         }
