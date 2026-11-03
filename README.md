@@ -92,6 +92,8 @@ Bash output is **one contributor to input tokens**, alongside your prompt, the s
 The token counts RTK reports are estimated as `bytes / 4` — RTK ships no tokenizer, so the **percentages are reliable but the absolute token numbers are approximate**.
 
 > Full explanation: [How RTK Savings Work](docs/guide/resources/savings-explained.md)
+
+**In PascalsLetter's own words:** `rtk gain` estimates the bytes removed from the commands RTK filtered; it is not a measure of billed tokens. [JetBrains' billed trial](https://blog.jetbrains.com/ai/2026/07/rtk-claude-code-token-savings/) of RTK v0.43.0 (claude-sonnet-5 in Claude Code, 86 SkillsBench tasks, 20 July 2026) found tasks cost 7.6% more at low reasoning effort (p = 0.004) and the same at high effort, with quality unchanged in both, whilst `rtk gain` reported 96.2 million tokens saved. Claude Code's Read and Grep tools bypass the Bash hook, so much of what an agent reads is never filtered. PascalsLetter's fixes target output that RTK lost or mangled; their effect on billed cost has not been measured.
 ### Quick Start
 
 ```bash
