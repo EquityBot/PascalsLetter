@@ -1857,6 +1857,47 @@ mod tests {
         );
     }
 
+    /// zsh runs the command after `&!`; bash runs `!git` as a command name. A rule
+    /// for either reading holds, as it does after `;`.
+    #[test]
+    fn test_zsh_disowned_command_is_still_checked() {
+        let all = vec!["*".to_string()];
+        for rule in ["git push:*", "!git:*"] {
+            let rule = vec![rule.to_string()];
+            for cmd in ["git status &!git push", "git status&!git push"] {
+                assert_eq!(
+                    check_command_with_rules(cmd, &rule, &[], &all),
+                    PermissionVerdict::Deny,
+                    "{rule:?} {cmd:?}"
+                );
+                assert_eq!(
+                    check_command_with_rules(cmd, &[], &rule, &all),
+                    PermissionVerdict::Ask,
+                    "{rule:?} {cmd:?}"
+                );
+            }
+        }
+        let rule = vec!["git push:*".to_string()];
+        for (cmd, after_semicolon) in [
+            (r#"git status &!"git" push"#, r#"git status; "git" push"#),
+            (
+                "zsh -c 'git status &!git push'",
+                "zsh -c 'git status; git push'",
+            ),
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &rule, &[], &all),
+                check_command_with_rules(after_semicolon, &rule, &[], &all),
+                "{cmd:?}"
+            );
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &rule, &all),
+                check_command_with_rules(after_semicolon, &[], &rule, &all),
+                "{cmd:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_substitution_never_auto_allowed() {
         let allow = vec!["git *".to_string()];
