@@ -1858,6 +1858,24 @@ mod tests {
     }
 
     #[test]
+    fn test_zsh_disowned_command_is_still_checked() {
+        let rule = vec!["git push:*".to_string()];
+        let all = vec!["*".to_string()];
+        for cmd in ["git status &!git push", "git status&!git push"] {
+            assert_eq!(
+                check_command_with_rules(cmd, &rule, &[], &all),
+                PermissionVerdict::Deny,
+                "{cmd:?}"
+            );
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &rule, &all),
+                PermissionVerdict::Ask,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_substitution_never_auto_allowed() {
         let allow = vec!["git *".to_string()];
         for cmd in [

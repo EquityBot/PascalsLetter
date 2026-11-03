@@ -787,6 +787,19 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
                 return out;
             }
             seg_start = tok.offset + tok.value.len();
+            // zsh reads a `!` glued to a background `&` as part of the operator: `&!`
+            // backgrounds and disowns, and the next command starts after the `!`. Reading
+            // it so keeps that command in view of the rules; in bash, where `!git` names
+            // no command, it only adds a check.
+            if policy.group_boundaries
+                && tok.kind == TokenKind::Shellism
+                && tok.value == "&"
+                && tokens
+                    .get(i + 1)
+                    .is_some_and(|next| next.offset == seg_start && next.value.starts_with('!'))
+            {
+                seg_start += 1;
+            }
             seg_has_text = false;
         } else if tok.kind == TokenKind::Redirect && policy.redirects != RedirectPolicy::Keep {
             if !seg_has_text {
@@ -2117,6 +2130,28 @@ mod tests {
             vec!["git status", "rm -rf ~"]
         );
         assert_eq!(split_for_permissions("sleep 1 &"), vec!["sleep 1"]);
+    }
+
+    /// zsh's `&!` backgrounds and disowns, then runs what follows the `!`: that command
+    /// must reach the rules as itself, not as `!git push`.
+    #[test]
+    fn test_split_perms_zsh_disown_keeps_the_next_command_visible() {
+        for cmd in [
+            "git status &!git push",
+            "git status&!git push",
+            "git status &! git push",
+        ] {
+            assert_eq!(
+                split_for_permissions(cmd),
+                vec!["git status", "git push"],
+                "{cmd:?}"
+            );
+        }
+        // A `!` that opens a command after a space is not part of the operator.
+        assert_eq!(
+            split_for_permissions("git status & !git push"),
+            vec!["git status", "!git push"]
+        );
     }
 
     #[test]
