@@ -7,8 +7,8 @@ use std::path::Path;
 use std::sync::{LazyLock, OnceLock};
 
 use super::lexer::{
-    ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer, coalesce_words,
-    contains_unattestable_construct_in, is_crlf_at, is_word_boundary_whitespace,
+    ParsedToken, PipeKind, QuoteScan, TokenKind, advance_quote_state, ansi_c_quote_defeats_lexer,
+    coalesce_words, contains_unattestable_construct_in, is_crlf_at, is_word_boundary_whitespace,
     redirect_has_file_target, shell_split, split_on_operators, tokenize, tokenize_with_newlines,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
@@ -742,21 +742,126 @@ fn strip_trailing_redirects(cmd: &str) -> (&str, &str) {
 
 /// Matches a bash line-continuation: a backslash immediately followed by
 /// `\n` or `\r\n`, *plus* any horizontal whitespace on the line before AND
-/// after the break. This is what bash already collapses to a single space
-/// before executing the command — rtk's hook matcher needs to do the same
-/// so commands authored across multiple lines still hit the rewrite rules.
-/// Consuming the trailing whitespace prevents double spaces in cases like
+/// after the break, so commands authored across multiple lines still hit the
+/// rewrite rules. Consuming the whitespace prevents double spaces in cases like
 /// `git diff \<NL>HEAD~1`.
 static LINE_CONTINUATION_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?m)[ \t\x0B\x0C]*\\\r?\n[ \t\x0B\x0C]*").unwrap());
 
 static BASH_JOIN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\\r?\n").unwrap());
 
-/// Replace every bash line continuation with a single space, mirroring what
-/// bash does before dispatching the command. Returns a borrowed `&str` when the
-/// input contains no continuations, so the common fast path allocates nothing.
+/// A backslash that opens a line continuation (`\<NL>` or `\<CR><NL>`).
+struct Continuation {
+    at: usize,
+    in_double: bool,
+    /// After a `$(` or backtick inside double quotes: bash starts new quoting
+    /// inside the substitution, which this scan, like the lexer, does not follow,
+    /// so a `'…'` there may keep its `\<NL>`.
+    after_substitution: bool,
+}
+
+/// The backslashes that open a line continuation, in order. A backslash that
+/// another one escapes opens nothing, and with `track_quotes` neither does one
+/// inside single quotes, where bash keeps `\<NL>` as written. Quote state
+/// follows the lexer's [`advance_quote_state`].
+fn line_continuations(s: &str, track_quotes: bool) -> Vec<Continuation> {
+    let bytes = s.as_bytes();
+    let mut quote = None;
+    // shortcut: once set this stays set, since the scan cannot tell where the
+    // substitution ends (its own quotes close and reopen the outer ones), so a
+    // continuation after a finished substitution is refused too. Following
+    // bash's nesting would lift that.
+    let mut after_substitution = false;
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if quote != Some('\'') => {
+                if bytes.get(i + 1) == Some(&b'\n') || is_crlf_at(bytes, i + 1) {
+                    found.push(Continuation {
+                        at: i,
+                        in_double: quote == Some('"'),
+                        after_substitution,
+                    });
+                }
+                i += 2;
+                continue;
+            }
+            b'`' if quote == Some('"') => after_substitution = true,
+            b'$' if quote == Some('"') && byte_after_joins(bytes, i + 1) == Some(b'(') => {
+                after_substitution = true;
+            }
+            b @ (b'\'' | b'"') if track_quotes => quote = advance_quote_state(quote, b as char),
+            _ => {}
+        }
+        i += 1;
+    }
+    found
+}
+
+/// The byte bash reads at `i` once it has removed the `\<NL>`s there, so that
+/// `$\<NL>(` still opens a substitution.
+fn byte_after_joins(bytes: &[u8], mut i: usize) -> Option<u8> {
+    while bytes.get(i) == Some(&b'\\') && bytes.get(i + 1) == Some(&b'\n') {
+        i += 2;
+    }
+    bytes.get(i).copied()
+}
+
+/// True when [`collapse_line_continuations`] cannot tell what bash removes: a
+/// continuation after a `$(` or backtick inside double quotes.
+fn line_continuation_quoting_unknown(s: &str) -> bool {
+    s.contains('\\')
+        && line_continuations(s, true)
+            .iter()
+            .any(|c| c.after_substitution)
+}
+
+/// Remove every bash line continuation as bash does before dispatching the
+/// command. Bash deletes `\<NL>` outright, so one inside a word joins it
+/// (`git sta\<NL>tus` runs `git status`); outside quotes, one with whitespace
+/// beside it becomes a single space, and inside double quotes only the `\<NL>`
+/// goes. Inside single quotes, or after a backslash that escapes this one
+/// (`\\<NL>`), it is no continuation and stays as written. A `\<CR><NL>`, which
+/// bash does not continue, still becomes a single space outside those two
+/// places, as it always has. Returns a borrowed `&str` when the input contains
+/// no continuations, so the common fast path allocates nothing.
 pub(crate) fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
-    LINE_CONTINUATION_RE.replace_all(s, " ")
+    collapse_continuations(s, true)
+}
+
+/// [`collapse_line_continuations`], but inside single quotes as well, for the
+/// shell-wrapper deny check: the shell that `bash -c '…'` starts removes the
+/// continuations in its script, and a script holding a newline is no wrapper
+/// RTK can read. Removing one bash would keep can only merge words, and that
+/// check gives `Defer` or `Ask`, never `Allow`.
+pub(crate) fn collapse_line_continuations_ignoring_quotes(s: &str) -> std::borrow::Cow<'_, str> {
+    collapse_continuations(s, false)
+}
+
+fn collapse_continuations(s: &str, track_quotes: bool) -> std::borrow::Cow<'_, str> {
+    if !s.contains('\\') {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let live = line_continuations(s, track_quotes);
+    LINE_CONTINUATION_RE.replace_all(s, |caps: &regex::Captures<'_>| {
+        let m = caps.get(0).expect("group 0 always matches");
+        let text = m.as_str();
+        let backslash = m.start() + text.find('\\').expect("every match holds a backslash");
+        let in_double = match live.binary_search_by_key(&backslash, |c| c.at) {
+            Ok(i) => live[i].in_double,
+            Err(_) => return text.to_string(),
+        };
+        if text.contains('\r') {
+            " ".to_string()
+        } else if in_double {
+            text.replacen("\\\n", "", 1)
+        } else if text.starts_with('\\') && text.ends_with('\n') {
+            String::new()
+        } else {
+            " ".to_string()
+        }
+    })
 }
 
 /// Returns `None` if the command is unsupported or ignored (hook should pass through).
@@ -817,6 +922,10 @@ pub(crate) fn rewrite_command_precompiled(
     if cmd.contains('\\') {
         let joined = BASH_JOIN_RE.replace_all(cmd, "");
         if has_heredoc(&joined) || joined.contains("$((") {
+            return None;
+        }
+        // Nor can a continuation inside `"$(…)"` be collapsed as bash would.
+        if line_continuation_quoting_unknown(cmd) {
             return None;
         }
     }
@@ -8550,6 +8659,75 @@ mod tests {
             rewrite_command_no_prefixes("git \\\n    diff HEAD~1", &[]),
             Some("rtk git diff HEAD~1".into())
         );
+    }
+
+    #[test]
+    fn test_rewrite_joins_a_continuation_inside_a_word() {
+        // Bash deletes `\<NL>`, so one inside a word joins it: `git sta\<NL>tus`
+        // runs `git status`, and `tsc\<NL>d` runs `tscd`, not `tsc d`.
+        assert_eq!(
+            rewrite_command_no_prefixes("git sta\\\ntus", &[]),
+            Some("rtk git status".into())
+        );
+        assert_eq!(rewrite_command_no_prefixes("tsc\\\nd", &[]), None);
+    }
+
+    #[test]
+    fn test_escaped_backslash_before_a_newline_is_no_continuation() {
+        // `ls\\<NL>pwd` runs `ls\` and then `pwd`; a third backslash continues the line.
+        assert_eq!(collapse_line_continuations("ls\\\\\npwd"), "ls\\\\\npwd");
+        assert_eq!(collapse_line_continuations("ls\\\\\\\npwd"), "ls\\\\pwd");
+        assert_eq!(collapse_line_continuations("git \\\n  diff"), "git diff");
+    }
+
+    #[test]
+    fn test_continuation_follows_bash_quoting() {
+        // Single quotes keep `\<NL>` as written, so `git 'sta\<NL>tus'` must not
+        // become `git 'status'`; double quotes drop only the `\<NL>` itself.
+        assert_eq!(
+            collapse_line_continuations("git 'sta\\\ntus'"),
+            "git 'sta\\\ntus'"
+        );
+        assert_eq!(
+            collapse_line_continuations("echo 'a \\\n b'"),
+            "echo 'a \\\n b'"
+        );
+        assert_eq!(
+            collapse_line_continuations("echo \"a \\\n b\""),
+            "echo \"a  b\""
+        );
+        assert_eq!(
+            collapse_line_continuations("git commit -m \"fix\\\nes\""),
+            "git commit -m \"fixes\""
+        );
+        // A single quote inside double quotes opens nothing.
+        assert_eq!(
+            collapse_line_continuations("bash -c \"echo 'a\\\nb'\""),
+            "bash -c \"echo 'ab'\""
+        );
+        // `\<CR><NL>` keeps its single space outside single quotes.
+        assert_eq!(collapse_line_continuations("git\\\r\nstatus"), "git status");
+        assert_eq!(
+            collapse_line_continuations("git 'a\\\r\nb'"),
+            "git 'a\\\r\nb'"
+        );
+        let out = rewrite_command_no_prefixes("git 'sta\\\ntus'", &[]);
+        assert!(
+            out.is_none() || out.as_deref() == Some("rtk git 'sta\\\ntus'"),
+            "{out:?}"
+        );
+        // Inside `"$(…)"` bash starts new quoting, which the scan cannot follow, so
+        // such a command runs as written, even when quotes inside the substitution
+        // close and reopen the outer ones.
+        for cmd in [
+            "cat \"$(printf 'a\\\nb')\"",
+            "git status \"`echo 'x\\\ny'`\"",
+            "cat \"$(printf \"%s\" 'a\\\nb')\"",
+            "cat \"$(echo \"'\")\" 'a\\\nb'",
+            "cat \"$\\\n(printf 'a\\\nb')\"",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
     }
 
     #[test]
