@@ -16,19 +16,18 @@ fn structure(cmd: &str) -> Vec<(TokenKind, String)> {
         .collect()
 }
 
-/// The command bash parses: it deletes every unescaped `\<NL>` (rtk also takes `\<CR><NL>`)
-/// before splitting it into tokens, so `&\<NL>&` runs as `&&`. The lexer keeps them. This is
-/// written apart from rtk's own helper so the target still checks that helper.
+/// The command bash parses: it deletes every unescaped `\<NL>` before splitting it into
+/// tokens, so `&\<NL>&` runs as `&&`. The lexer keeps them. This is written apart from rtk's
+/// own helper so the target still checks that helper. `\<CR><NL>` is no continuation in bash:
+/// the backslash escapes the CR. Quotes are not tracked: bash keeps `\<NL>` inside single
+/// quotes, but there it sits inside one word, so removing it cannot change the structure.
 fn bash_joined(cmd: &str) -> String {
     let mut out = String::with_capacity(cmd.len());
     let mut rest = cmd;
     while let Some(i) = rest.find('\\') {
         out.push_str(&rest[..i]);
         let after = &rest[i + 1..];
-        if let Some(tail) = after
-            .strip_prefix('\n')
-            .or_else(|| after.strip_prefix("\r\n"))
-        {
+        if let Some(tail) = after.strip_prefix('\n') {
             rest = tail;
         } else {
             // An escaped character, another backslash included, stays as written.

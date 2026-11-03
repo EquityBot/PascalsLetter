@@ -270,7 +270,7 @@ pub(crate) fn check_command_with_rules_and_prefixes(
     }
 
     let transparent_prefixes = registry::normalize_transparent_prefixes(transparent_prefixes);
-    let joined = registry::collapse_line_continuations(cmd);
+    let joined = registry::collapse_line_continuations_ignoring_quotes(cmd);
     let wrapper_segments = split_for_wrappers(&joined);
     if let Some(verdict) =
         check_shell_wrapper_permissions(&wrapper_segments, deny_rules, &transparent_prefixes)
@@ -2438,12 +2438,14 @@ mod tests {
 
     #[test]
     fn test_continuation_inside_a_word_is_joined_before_the_wrapper_check() {
-        // The inner bash runs `git pu\<NL>sh` as `git push`; collapsing the
-        // continuation to a space made the wrapper check see `git pu sh`.
+        // The inner bash runs `git pu\<NL>sh` as `git push` (the outer one already
+        // joins it inside double quotes); collapsing the continuation to a space
+        // made the wrapper check see `git pu sh`.
         let deny = vec!["git push:*".to_string()];
         let allow = vec!["*".to_string()];
         for cmd in [
             "bash -c 'git pu\\\nsh'",
+            "bash -c \"git pu\\\nsh\"",
             "bash -c 'git status; git pu\\\nsh origin'",
         ] {
             assert_eq!(
