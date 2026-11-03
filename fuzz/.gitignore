@@ -1,0 +1,6 @@
+target/
+corpus/
+artifacts/
+coverage/
+# CI seeds it from the root Cargo.lock.
+Cargo.lock

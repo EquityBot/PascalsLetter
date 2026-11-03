@@ -1,0 +1,25 @@
+[package]
+name = "rtk-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Detached from the rtk workspace: run with `cargo +nightly fuzz run rewrite` from the
+# repository root, after copying Cargo.lock into fuzz/.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# The Apache-2.0 hook core holds the rewriter; the engine is not needed.
+rtk = { path = "..", default-features = false }
+
+[[bin]]
+name = "rewrite"
+path = "fuzz_targets/rewrite.rs"
+test = false
+doc = false
+bench = false

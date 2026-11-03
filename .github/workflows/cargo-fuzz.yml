@@ -1,0 +1,43 @@
+name: Fuzz
+
+# libFuzzer runs of the hook rewriter, weekly and on demand: fuzz/fuzz_targets/rewrite.rs checks
+# that a rewrite keeps every operator, pipe, redirect and shellism of the command an agent ran.
+# A crash's input is uploaded.
+on:
+  schedule:
+    - cron: "17 5 * * 3"
+  workflow_dispatch:
+
+# The token is only used to check out the code: the job writes nothing to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rewrite:
+    name: rewrite (10 min)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install nightly and the pinned cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo +nightly install cargo-fuzz --locked --version 0.13.2
+      - name: Fuzz for 10 minutes
+        run: |
+          cp Cargo.lock fuzz/Cargo.lock
+          mkdir -p fuzz/corpus/rewrite
+          cargo +nightly fuzz run rewrite fuzz/corpus/rewrite -- -max_total_time=600 -rss_limit_mb=4096
+      - name: Keep the crashing input
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-rewrite
+          path: fuzz/artifacts/rewrite
+          if-no-files-found: ignore

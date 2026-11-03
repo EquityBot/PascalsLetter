@@ -8,8 +8,8 @@ use std::sync::{LazyLock, OnceLock};
 
 use super::lexer::{
     ParsedToken, PipeKind, QuoteScan, TokenKind, ansi_c_quote_defeats_lexer, coalesce_words,
-    contains_unattestable_construct_in, is_crlf_at, redirect_has_file_target, shell_split,
-    split_on_operators, tokenize, tokenize_with_newlines,
+    contains_unattestable_construct_in, is_crlf_at, is_word_boundary_whitespace,
+    redirect_has_file_target, shell_split, split_on_operators, tokenize, tokenize_with_newlines,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use super::shell_wrapper::parse_shell_wrapper;
@@ -404,6 +404,12 @@ fn normalize_php_tool_command_with_dirs(cmd: &str, bin_dirs: &[std::path::PathBu
 }
 
 fn normalize_php_tool_word<'a>(word: &str, bin_dirs: &'a [std::path::PathBuf]) -> Option<&'a str> {
+    // A path the shell expands (`$ROOT/vendor/bin/phpunit`, `~/x/vendor/bin/pint`, a glob)
+    // or that holds shell syntax (`a!/vendor/bin/pint`) names a copy of the tool elsewhere;
+    // reducing it to the bare tool would run the current project's copy.
+    if word.contains(['$', '`', '~', '*', '?', '[', '!', '(', ')', '{', '}']) {
+        return None;
+    }
     let normalized_word = normalize_php_tool_path(word);
 
     for tool in PHP_TOOL_NAMES {
@@ -791,6 +797,16 @@ pub(crate) fn rewrite_command_precompiled(
     compiled: &[ExcludePattern],
     normalized_prefixes: &[String],
 ) -> Option<String> {
+    // Bash splits words only at spaces, tabs and newlines, but the rewriter trims and splits at
+    // any whitespace, so other whitespace (a vertical tab, NBSP) can move a word boundary:
+    // `cat \v7>&2` would become a redirect of descriptor 7. Such a command runs as written.
+    if cmd
+        .chars()
+        .any(|c| c.is_whitespace() && c != '\r' && !is_word_boundary_whitespace(c))
+    {
+        return None;
+    }
+
     // Bash joins `\<NL>` with nothing, so `<<` or `$((` can arrive split across
     // a continuation; the space-join below would erase them (#3188 review).
     if cmd.contains('\\') {
@@ -8603,6 +8619,44 @@ mod tests {
             rewrite_command_no_prefixes("vendor/bin/phpunit --filter EmailTest", &[]),
             Some("rtk phpunit --filter EmailTest".into())
         );
+    }
+
+    #[test]
+    fn test_php_tool_path_with_shell_expansion_is_not_rewritten() {
+        // Found by fuzz/fuzz_targets/rewrite.rs: the expansion was dropped, so the
+        // rewrite ran the current project's tool instead of the one the path names.
+        for (cmd, path) in [
+            (
+                "$ROOT/vendor/bin/phpunit tests/",
+                "$ROOT/vendor/bin/phpunit",
+            ),
+            ("${ROOT}/vendor/bin/pint --test", "${ROOT}/vendor/bin/pint"),
+            (
+                "`pwd`/vendor/bin/phpstan analyse src",
+                "`pwd`/vendor/bin/phpstan",
+            ),
+            (
+                "php $ROOT/vendor/bin/phpunit tests/",
+                "$ROOT/vendor/bin/phpunit",
+            ),
+            ("a!/vendor/bin/pint; ls", "a!/vendor/bin/pint"),
+            ("~/tools/vendor/bin/pint --test", "~/tools/vendor/bin/pint"),
+            ("*/vendor/bin/phpunit tests/", "*/vendor/bin/phpunit"),
+        ] {
+            if let Some(out) = rewrite_command_no_prefixes(cmd, &[]) {
+                assert!(out.contains(path), "{cmd:?} -> {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_whitespace_bash_does_not_split_at_is_not_rewritten() {
+        // Found by fuzz/fuzz_targets/rewrite.rs: the vertical tab was taken as a word
+        // break, so `>&2` became a redirect of descriptor 7.
+        for cmd in ["cat \u{b}7>&2", "cat a\u{a0}b", "git\u{c}status"] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
+        assert!(rewrite_command_no_prefixes("cat a\tb", &[]).is_some());
     }
 
     #[test]

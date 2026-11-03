@@ -167,3 +167,5 @@ assets = [
 [lints.rust]
 unsafe_code = "deny"
 warnings = "deny"
+# fuzz/ builds with --cfg fuzzing, which makes `discover` public for its target.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
