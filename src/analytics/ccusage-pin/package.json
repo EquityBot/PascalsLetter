@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "The ccusage release rtk runs through npx when ccusage is not installed. Dependabot proposes each new release.",
+  "dependencies": {
+    "ccusage": "20.0.48"
+  }
+}

@@ -49,6 +49,7 @@ Each change has a regression test, except `grep_max_results`.
 | Unusual whitespace | A command holding whitespace Bash does not split words at, such as a vertical tab or a no-break space, runs as written. The rewriter split there, which could turn `>&2` into a redirect of another descriptor. Found by the `rewrite` fuzz target. |
 | `rtk-proxy` key lending | The relayed provider key is lent only to a keyless request carrying the `x-rtk-proxy` header (which `rtk task` sends) with a `localhost` or IP `Host`, so a web page, including a DNS-rebound one, cannot spend it. |
 | `rtk gain` | The summary, per-command and daily, weekly and monthly tables count an oversised row at a fixed 7,500-token cap, and the headline figure is net. |
+| `rtk cc-economics` | Without a global ccusage, the `npx` fallback runs the exact ccusage release pinned in `src/analytics/ccusage-pin/package.json`, which Dependabot bumps, instead of whatever npm serves as latest. |
 
 Generally useful fixes are offered upstream as draft pull requests, listed in [FORKS.md](https://github.com/EquityBot/EquityBot/blob/main/FORKS.md).
 
