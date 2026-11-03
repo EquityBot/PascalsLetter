@@ -745,33 +745,64 @@ static LINE_CONTINUATION_RE: LazyLock<Regex> =
 
 static BASH_JOIN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\\\r?\n").unwrap());
 
-/// Offsets of the backslashes that open a line continuation (`\<NL>` or
-/// `\<CR><NL>`), each with whether it sits inside double quotes. A backslash
-/// that another one escapes opens nothing, and with `track_quotes` neither does
-/// one inside single quotes, where bash keeps `\<NL>` as written. Quote state
+/// A backslash that opens a line continuation (`\<NL>` or `\<CR><NL>`).
+struct Continuation {
+    at: usize,
+    in_double: bool,
+    /// Inside double quotes after a `$(` or backtick in them: bash starts new
+    /// quoting inside the substitution, which this scan, like the lexer, does not
+    /// follow, so a `'…'` there may keep its `\<NL>`.
+    after_substitution: bool,
+}
+
+/// The backslashes that open a line continuation, in order. A backslash that
+/// another one escapes opens nothing, and with `track_quotes` neither does one
+/// inside single quotes, where bash keeps `\<NL>` as written. Quote state
 /// follows the lexer's [`advance_quote_state`].
-fn line_continuation_offsets(s: &str, track_quotes: bool) -> Vec<(usize, bool)> {
+fn line_continuations(s: &str, track_quotes: bool) -> Vec<Continuation> {
     let bytes = s.as_bytes();
     let mut quote = None;
+    let mut substitution_in_double = false;
     let mut found = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
             b'\\' if quote != Some('\'') => {
                 if bytes.get(i + 1) == Some(&b'\n') || is_crlf_at(bytes, i + 1) {
-                    found.push((i, quote == Some('"')));
+                    found.push(Continuation {
+                        at: i,
+                        in_double: quote == Some('"'),
+                        after_substitution: substitution_in_double,
+                    });
                 }
                 i += 2;
                 continue;
             }
+            b'`' if quote == Some('"') => substitution_in_double = true,
+            b'$' if quote == Some('"') && bytes.get(i + 1) == Some(&b'(') => {
+                substitution_in_double = true;
+            }
             b @ (b'\'' | b'"') if track_quotes => {
-                quote = advance_quote_state(quote, b as char);
+                let next = advance_quote_state(quote, b as char);
+                if next != quote {
+                    substitution_in_double = false;
+                }
+                quote = next;
             }
             _ => {}
         }
         i += 1;
     }
     found
+}
+
+/// True when [`collapse_line_continuations`] cannot tell what bash removes: a
+/// continuation inside double quotes after a `$(` or backtick in them.
+fn line_continuation_quoting_unknown(s: &str) -> bool {
+    s.contains('\\')
+        && line_continuations(s, true)
+            .iter()
+            .any(|c| c.after_substitution)
 }
 
 /// Remove every bash line continuation as bash does before dispatching the
@@ -800,13 +831,13 @@ fn collapse_continuations(s: &str, track_quotes: bool) -> std::borrow::Cow<'_, s
     if !s.contains('\\') {
         return std::borrow::Cow::Borrowed(s);
     }
-    let live = line_continuation_offsets(s, track_quotes);
+    let live = line_continuations(s, track_quotes);
     LINE_CONTINUATION_RE.replace_all(s, |caps: &regex::Captures<'_>| {
         let m = caps.get(0).expect("group 0 always matches");
         let text = m.as_str();
         let backslash = m.start() + text.find('\\').expect("every match holds a backslash");
-        let in_double = match live.binary_search_by_key(&backslash, |&(at, _)| at) {
-            Ok(i) => live[i].1,
+        let in_double = match live.binary_search_by_key(&backslash, |c| c.at) {
+            Ok(i) => live[i].in_double,
             Err(_) => return text.to_string(),
         };
         if text.contains('\r') {
@@ -879,6 +910,10 @@ pub(crate) fn rewrite_command_precompiled(
     if cmd.contains('\\') {
         let joined = BASH_JOIN_RE.replace_all(cmd, "");
         if has_heredoc(&joined) || joined.contains("$((") {
+            return None;
+        }
+        // Nor can a continuation inside `"$(…)"` be collapsed as bash would.
+        if line_continuation_quoting_unknown(cmd) {
             return None;
         }
     }
@@ -8669,6 +8704,14 @@ mod tests {
             out.is_none() || out.as_deref() == Some("rtk git 'sta\\\ntus'"),
             "{out:?}"
         );
+        // Inside `"$(…)"` bash starts new quoting, which the scan cannot follow, so
+        // such a command runs as written.
+        for cmd in [
+            "cat \"$(printf 'a\\\nb')\"",
+            "git status \"`echo 'x\\\ny'`\"",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
     }
 
     #[test]
