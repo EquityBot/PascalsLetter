@@ -361,7 +361,7 @@ jobs:
         run: sudo apt-get install -y tree ripgrep
 
       - name: Install Python tools
-        run: pip install --only-binary ':all:' ruff==0.17.3 pytest==9.2.0 mypy==2.4.1
+        run: pip install --only-binary ':all:' --require-hashes --requirement .github/ci/benchmark-requirements.txt
 
       - name: Install Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
