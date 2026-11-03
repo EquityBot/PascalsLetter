@@ -327,7 +327,10 @@ where
     } else {
         raw
     };
-    let filtered = filter_fn(text_to_filter, exit_code);
+    let filtered = filter_fn(
+        &stream::collapse_terminal_control(text_to_filter),
+        exit_code,
+    );
 
     let raw_for_tracking = if opts.filter_stdout_only {
         raw_stdout
