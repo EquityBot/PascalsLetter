@@ -9,6 +9,15 @@ updates:
       - "dependencies"
     open-pull-requests-limit: 5
 
+  # The ccusage release the npx fallback runs (src/analytics/ccusage.rs).
+  - package-ecosystem: "npm"
+    target-branch: "develop"
+    directory: "/src/analytics/ccusage-pin"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+
   - package-ecosystem: "github-actions"
     target-branch: "develop"
     directory: "/"

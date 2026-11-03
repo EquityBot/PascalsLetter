@@ -97,6 +97,17 @@ fn binary_exists() -> bool {
     tool_exists("ccusage")
 }
 
+/// The exact ccusage release the npx fallback runs, as `ccusage@<version>`.
+/// An unpinned `npx --yes ccusage` would download and run whatever npm serves
+/// as latest on each use. The version lives in `ccusage-pin/package.json`, so
+/// Dependabot proposes each new release as a reviewed pull request.
+fn npx_package() -> Option<String> {
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("ccusage-pin/package.json")).ok()?;
+    let version = manifest["dependencies"]["ccusage"].as_str()?;
+    Some(format!("ccusage@{version}"))
+}
+
 /// Build the ccusage command, falling back to npx if binary not in PATH
 fn build_command() -> Option<Command> {
     if binary_exists() {
@@ -105,9 +116,10 @@ fn build_command() -> Option<Command> {
 
     // Fallback: try npx
     eprintln!("[info] ccusage not installed globally, fetching via npx...");
+    let package = npx_package()?;
     let npx_check = resolved_command("npx")
         .arg("--yes")
-        .arg("ccusage")
+        .arg(&package)
         .arg("--help")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -116,7 +128,7 @@ fn build_command() -> Option<Command> {
     if npx_check.map(|s| s.success()).unwrap_or(false) {
         let mut cmd = resolved_command("npx");
         cmd.arg("--yes");
-        cmd.arg("ccusage");
+        cmd.arg(&package);
         return Some(cmd);
     }
 
@@ -306,6 +318,22 @@ fn parse_json(json: &str, granularity: Granularity) -> Result<Vec<CcusagePeriod>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_npx_fallback_runs_an_exact_ccusage_release() {
+        let package = npx_package().expect("ccusage-pin/package.json pins ccusage");
+        let version = package
+            .strip_prefix("ccusage@")
+            .expect("package is ccusage@<version>");
+        let parts: Vec<_> = version.split('.').collect();
+        assert_eq!(parts.len(), 3, "{package} is not an exact x.y.z release");
+        assert!(
+            parts
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())),
+            "{package} is a range or tag, not an exact release"
+        );
+    }
 
     fn weekly_payload(field: &str, dates: &[&str]) -> String {
         let weekly: Vec<_> = dates
