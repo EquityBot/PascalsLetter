@@ -17,3 +17,12 @@ updates:
     labels:
       - "dependencies"
       - "area:ci"
+
+  # The benchmark job's Python tools, pinned by hash in benchmark-requirements.txt.
+  - package-ecosystem: "pip"
+    target-branch: "develop"
+    directory: "/.github/ci"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
