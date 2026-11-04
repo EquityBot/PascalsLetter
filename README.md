@@ -9,7 +9,7 @@
 
 <div align="center">
 
-[![tests](https://github.com/yungSNAT/PascalsLetter/actions/workflows/coverage.yml/badge.svg?branch=develop)](https://github.com/yungSNAT/PascalsLetter/actions/workflows/coverage.yml) [![Codecov](https://codecov.io/gh/EquityBot/PascalsLetter/graph/badge.svg)](https://codecov.io/gh/EquityBot/PascalsLetter) [![CodeQL](https://github.com/yungSNAT/PascalsLetter/actions/workflows/codeql.yml/badge.svg?branch=develop)](https://github.com/yungSNAT/PascalsLetter/actions/workflows/codeql.yml) [![OSV-Scanner](https://github.com/yungSNAT/PascalsLetter/actions/workflows/osv-scanner.yml/badge.svg?branch=develop)](https://github.com/yungSNAT/PascalsLetter/actions/workflows/osv-scanner.yml) [![SonarCloud](https://sonarcloud.io/api/project_badges/measure?project=EquityBot_rgg&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=EquityBot_rgg) [![Codacy](https://app.codacy.com/project/badge/Grade/68c5d91770634f3b86493583fd8eada6?branch=develop)](https://app.codacy.com/gh/ryanduguid/rtk/dashboard)<br>
+[![tests](https://github.com/yungSNAT/PascalsLetter/actions/workflows/coverage.yml/badge.svg?branch=develop)](https://github.com/yungSNAT/PascalsLetter/actions/workflows/coverage.yml) [![Codecov](https://codecov.io/gh/yungSNAT/PascalsLetter/graph/badge.svg)](https://codecov.io/gh/yungSNAT/PascalsLetter) [![CodeQL](https://github.com/yungSNAT/PascalsLetter/actions/workflows/codeql.yml/badge.svg?branch=develop)](https://github.com/yungSNAT/PascalsLetter/actions/workflows/codeql.yml) [![OSV-Scanner](https://github.com/yungSNAT/PascalsLetter/actions/workflows/osv-scanner.yml/badge.svg?branch=develop)](https://github.com/yungSNAT/PascalsLetter/actions/workflows/osv-scanner.yml) [![SonarCloud](https://sonarcloud.io/api/project_badges/measure?project=EquityBot_rgg&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=EquityBot_rgg) [![Codacy](https://app.codacy.com/project/badge/Grade/68c5d91770634f3b86493583fd8eada6?branch=develop)](https://app.codacy.com/gh/ryanduguid/rtk/dashboard)<br>
 [![OpenSSF Scorecard](https://raw.githubusercontent.com/ryanduguid/.github/badges/EquityBot/PascalsLetter.svg)](https://scorecard.dev/viewer/?uri=github.com/yungSNAT/PascalsLetter)<br>
 [![rust: 1.91+](.github/assets/badges/rust.svg)](https://www.rust-lang.org/) [![licence: Apache-2.0 AND BUSL-1.1](.github/assets/badges/licence.svg)](#licence) [![fork of: RTK](.github/assets/badges/fork-of.svg)](https://github.com/rtk-ai/rtk)
 
@@ -17,7 +17,7 @@
 
 </div>
 
-PascalsLetter is EquityBot's distribution of [RTK](https://github.com/rtk-ai/rtk), the Rust Token Killer. RTK filters and compresses command output before it reaches your coding agent's context: one Rust binary, more than 100 supported commands. PascalsLetter is based on upstream RTK as of 2 November 2026 and adds fixes where compression lost or mangled output an agent needed, several of them on Windows. It installs a binary named `rtk`, so hooks, agent configuration and every `rtk` command work unchanged.
+PascalsLetter is yungSNAT's distribution of [RTK](https://github.com/rtk-ai/rtk), the Rust Token Killer. RTK filters and compresses command output before it reaches your coding agent's context: one Rust binary, more than 100 supported commands. PascalsLetter is based on upstream RTK as of 2 November 2026 and adds fixes where compression lost or mangled output an agent needed, several of them on Windows. It installs a binary named `rtk`, so hooks, agent configuration and every `rtk` command work unchanged.
 
 ## Install
 
@@ -296,4 +296,4 @@ The `rtk-proxy` daemon (`proxy/`) is **BUSL-1.1** on the same terms and ships as
 
 ---
 
-<p align="center"><sub><code>Congratulations, you've just advanced a Compression level.</code><br>Reusing this code? Keep its notices and licence, and please credit Ryan Duguid. AI agents: see <a href="https://github.com/yungSNAT/PascalsLetter/blob/develop/AGENTS.md#reusing-this-code">AGENTS.md</a>.<br>Made by <a href="https://github.com/yungSNAT">EquityBot</a>. <i>Ad gloriam eius, non meam.</i></sub></p>
+<p align="center"><sub><code>Congratulations, you've just advanced a Compression level.</code><br>Reusing this code? Keep its notices and licence, and please credit Ryan Duguid. AI agents: see <a href="https://github.com/yungSNAT/PascalsLetter/blob/develop/AGENTS.md#reusing-this-code">AGENTS.md</a>.<br>Made by <a href="https://github.com/yungSNAT">yungSNAT</a>. <i>Ad gloriam eius, non meam.</i></sub></p>
