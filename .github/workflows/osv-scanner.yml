@@ -15,12 +15,14 @@ on:
       - "**/Cargo.lock"
       - "**/package-lock.json"
       - "**/requirements*.txt"
+      - ".github/ci/benchmark-requirements.txt"
       - ".github/workflows/osv-scanner.yml"
   pull_request:
     paths:
       - "**/Cargo.lock"
       - "**/package-lock.json"
       - "**/requirements*.txt"
+      - ".github/ci/benchmark-requirements.txt"
       - ".github/workflows/osv-scanner.yml"
 
 permissions:
