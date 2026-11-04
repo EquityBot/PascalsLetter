@@ -4,7 +4,7 @@ use crate::hooks::init::resolve_claude_dir;
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, ErrorKind};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use walkdir::WalkDir;
@@ -337,18 +337,15 @@ impl SessionProvider for ClaudeProvider {
         let mut results: HashMap<String, usize> = HashMap::new(); // tool_use_id to text bytes
         let mut unparsed_lines = 0;
 
-        for line in BufReader::new(file).lines() {
-            let line = match line {
-                Ok(line) => line,
-                Err(e) => {
-                    unparsed_lines += 1;
-                    // Bad bytes cost their line. A failed read would fail again, so stop there
-                    // and keep what was counted.
-                    if e.kind() == ErrorKind::InvalidData {
-                        continue;
-                    }
-                    break;
-                }
+        for line in BufReader::new(file).split(b'\n') {
+            // A failed read would fail again, so stop there and keep what was counted.
+            let Ok(line) = line else {
+                unparsed_lines += 1;
+                break;
+            };
+            let Ok(line) = String::from_utf8(line) else {
+                unparsed_lines += 1;
+                continue;
             };
 
             if !line.contains("\"tool_use\"") && !line.contains("\"tool_result\"") {
