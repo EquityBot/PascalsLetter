@@ -1,3 +1,6 @@
+// Copyright 2026 Ryan Duguid
+// SPDX-License-Identifier: Apache-2.0
+
 use std::fs;
 use std::io::Write;
 use std::process::{Output, Stdio};

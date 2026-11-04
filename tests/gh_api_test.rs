@@ -1,3 +1,6 @@
+// Copyright 2026 Ryan Duguid
+// SPDX-License-Identifier: Apache-2.0
+
 //! `rtk gh api` drops api.github.com `*_url` links from a JSON response and stores the whole
 //! response for `rtk recall`. Everything it does not filter must reach the caller byte for
 //! byte: invalid UTF-8, CRLF, a missing final newline, a response past the 10 MiB line
