@@ -2,7 +2,9 @@
 
 use crate::core::utils::format_tokens;
 use crate::discover::is_already_rtk;
-use crate::discover::provider::{ClaudeProvider, ExtractedCommand, SessionProvider};
+use crate::discover::provider::{
+    ClaudeProvider, ExtractedCommand, SessionProvider, ToolOutputBytes,
+};
 use crate::discover::registry::{Classification, classify_command, split_command_chain};
 use anyhow::{Context, Result};
 use std::fs;
@@ -59,6 +61,48 @@ fn progress_bar(pct: f64, width: usize) -> String {
     format!("{}{}", "@".repeat(filled), ".".repeat(empty))
 }
 
+/// Total the tool output in `paths`, with how many of the logs could be read.
+fn sum_tool_output(provider: &impl SessionProvider, paths: &[PathBuf]) -> (ToolOutputBytes, usize) {
+    let mut total = ToolOutputBytes::default();
+    let mut logs_read = 0;
+    for path in paths {
+        if let Ok(output) = provider.tool_output_bytes(path) {
+            total.bash += output.bash;
+            total.all += output.all;
+            total.unparsed_lines += output.unparsed_lines;
+            logs_read += 1;
+        }
+    }
+    (total, logs_read)
+}
+
+/// Bash's share of all tool output, and what the figure covers. `rtk gain` has
+/// no such denominator: it counts only the commands RTK filtered.
+fn tool_output_report(output: &ToolOutputBytes, logs_read: usize, logs_total: usize) -> String {
+    if output.all == 0 {
+        return "No tool output logged in these sessions.".to_string();
+    }
+    let share = output.bash as f64 / output.all as f64 * 100.0;
+    let mut report = format!(
+        "Bash share of tool output: {:.0}% ({} of {} bytes, {} of {} sessions)\n  \
+         Only Bash reaches RTK's default hook, so `rtk gain` leaves out the rest.\n  \
+         Text in logged tool results, after any filtering. \
+         Images and subagent logs are not counted.",
+        share,
+        format_tokens(output.bash),
+        format_tokens(output.all),
+        logs_read,
+        logs_total,
+    );
+    if output.unparsed_lines > 0 {
+        report.push_str(&format!(
+            "\n  Log lines that did not parse, so are not counted: {}",
+            output.unparsed_lines
+        ));
+    }
+    report
+}
+
 pub fn run(_verbose: u8) -> Result<()> {
     let provider = ClaudeProvider;
     let sessions = provider
@@ -93,6 +137,10 @@ pub fn run(_verbose: u8) -> Result<()> {
 
     // Take top 10
     session_files.truncate(10);
+
+    // Every log counts, including those the table skips for having no Bash:
+    // leaving them out would flatter Bash's share.
+    let (tool_output, logs_read) = sum_tool_output(&provider, &session_files);
 
     let mut summaries: Vec<SessionSummary> = Vec::new();
 
@@ -186,6 +234,10 @@ pub fn run(_verbose: u8) -> Result<()> {
         0.0
     };
     println!("Average adoption: {:.0}%", avg_adoption);
+    println!(
+        "{}",
+        tool_output_report(&tool_output, logs_read, session_files.len())
+    );
     println!("Tip: Run `rtk discover` to find missed RTK opportunities");
 
     Ok(())
@@ -217,6 +269,42 @@ mod tests {
         assert_eq!(progress_bar(0.0, 5), ".....");
         assert_eq!(progress_bar(100.0, 5), "@@@@@");
         assert_eq!(progress_bar(50.0, 5), "@@@..");
+    }
+
+    // --- tool output share ---
+
+    #[test]
+    fn test_sum_tool_output_counts_only_readable_logs() {
+        let mut log = NamedTempFile::new().expect("create tempfile");
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"abc"}]}}"#;
+        writeln!(log, "{}", line).expect("write line");
+        let missing = log.path().with_extension("missing");
+
+        let (total, logs_read) =
+            sum_tool_output(&ClaudeProvider, &[log.path().to_path_buf(), missing]);
+
+        assert_eq!(total.all, 3);
+        assert_eq!(logs_read, 1);
+    }
+
+    #[test]
+    fn test_tool_output_report_says_when_lines_did_not_parse() {
+        let output = ToolOutputBytes {
+            bash: 1,
+            all: 4,
+            unparsed_lines: 2,
+        };
+        let report = tool_output_report(&output, 9, 10);
+        assert!(
+            report.starts_with("Bash share of tool output: 25% (1 of 4 bytes, 9 of 10 sessions)")
+        );
+        assert!(report.ends_with("Log lines that did not parse, so are not counted: 2"));
+    }
+
+    #[test]
+    fn test_tool_output_report_without_output() {
+        let report = tool_output_report(&ToolOutputBytes::default(), 1, 1);
+        assert_eq!(report, "No tool output logged in these sessions.");
     }
 
     // --- count_rtk_commands: core counting logic ---

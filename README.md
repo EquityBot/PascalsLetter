@@ -50,6 +50,7 @@ Each change has a regression test, except `grep_max_results`.
 | `rtk-proxy` key lending | The relayed provider key is lent only to a keyless request carrying the `x-rtk-proxy` header (which `rtk task` sends) with a `localhost` or IP `Host`, so a web page, including a DNS-rebound one, cannot spend it. |
 | `rtk-proxy` health check | A server on the proxy port that answers and hangs up early reads as not the proxy. On macOS the check, which the session-start hook also runs, could panic inside ureq instead ([rtk-ai/rtk#4912](https://github.com/rtk-ai/rtk/issues/4912)). |
 | `rtk gain` | The summary, per-command and daily, weekly and monthly tables count an oversised row at a fixed 7,500-token cap, and the headline figure is net. |
+| `rtk session` | Ends with Bash's share of all tool output in recent sessions, the denominator `rtk gain` lacks, and says what the figure leaves out. |
 | `rtk cc-economics` | Without a global ccusage, the `npx` fallback runs the exact ccusage release pinned in `src/analytics/ccusage-pin/package.json`, which Dependabot bumps, instead of whatever npm serves as latest. |
 
 Generally useful fixes are offered upstream as draft pull requests, listed in [FORKS.md](https://github.com/yungSNAT/yungSNAT/blob/main/FORKS.md).

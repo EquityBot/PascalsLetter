@@ -58,3 +58,11 @@ Average coverage: 95.0%
 ```
 
 Low coverage on a session usually means RTK was disabled (`RTK_DISABLED=1`) or the hook wasn't active for a specific subagent.
+
+The report ends with Bash's share of all tool output, the denominator `rtk gain` lacks:
+
+```
+Bash share of tool output: 40% (1.2M of 3.0M bytes, 10 of 10 sessions)
+```
+
+Only Bash reaches RTK's default hook, so `rtk gain` leaves out what Read, Grep, MCP servers and other tools return, unless a pipeline adds them. The figure covers the text in the tool results of the same 10 logs, including any session with no Bash. It is measured after filtering, so it falls as RTK cuts Bash output. Images and subagent logs are not counted, and the report says how many logs or lines it could not read.
