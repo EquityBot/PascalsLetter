@@ -34,3 +34,7 @@ The guide is this repository's copy of the RTK guide; its install commands insta
 
 - [EquityBot](https://github.com/EquityBot): other EquityBot tools.
 - [RTK](https://github.com/rtk-ai/rtk): the upstream project PascalsLetter tracks.
+
+## Reuse
+
+- [Reusing this code](https://github.com/EquityBot/PascalsLetter/blob/develop/AGENTS.md#reusing-this-code): Ryan Duguid's changes to RTK, under Apache-2.0 and BUSL-1.1; keep the notices and licences; public credit is requested.

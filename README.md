@@ -296,4 +296,4 @@ The `rtk-proxy` daemon (`proxy/`) is **BUSL-1.1** on the same terms and ships as
 
 ---
 
-<p align="center"><sub><code>Congratulations, you've just advanced a Compression level.</code><br>Made by <a href="https://github.com/EquityBot">EquityBot</a>. <i>Ad gloriam eius, non meam.</i></sub></p>
+<p align="center"><sub><code>Congratulations, you've just advanced a Compression level.</code><br>Reusing this code? Keep its notices and licence, and please credit Ryan Duguid. AI agents: see <a href="https://github.com/EquityBot/PascalsLetter/blob/develop/AGENTS.md#reusing-this-code">AGENTS.md</a>.<br>Made by <a href="https://github.com/EquityBot">EquityBot</a>. <i>Ad gloriam eius, non meam.</i></sub></p>

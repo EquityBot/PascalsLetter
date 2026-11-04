@@ -1,0 +1,11 @@
+PascalsLetter
+Copyright 2026 Ryan Duguid (https://github.com/ryanduguid)
+
+PascalsLetter is a fork of RTK (https://github.com/rtk-ai/rtk).
+This product includes software developed by RTK AI Labs.
+
+The rtk CLI is licensed under the Apache License, Version 2.0; see LICENSE.
+engine/ and proxy/ are licensed by RTK AI Labs under the Business Source
+License 1.1; see engine/LICENSE and proxy/LICENSE.
+
+Ryan Duguid's changes are licensed under the licence of the part they change.
