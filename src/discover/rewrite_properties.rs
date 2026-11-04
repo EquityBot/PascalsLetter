@@ -1,3 +1,6 @@
+// Copyright 2026 Ryan Duguid
+// SPDX-License-Identifier: Apache-2.0
+
 //! Property check for `rewrite_command`: a rewrite may change the words of a
 //! command but never its shell structure. Every operator, pipe, redirect and
 //! shellism the lexer sees in the original must appear, in order, in the

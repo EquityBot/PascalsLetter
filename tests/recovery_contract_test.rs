@@ -1,3 +1,6 @@
+// Copyright 2026 Ryan Duguid
+// SPDX-License-Identifier: Apache-2.0
+
 //! Cross-process recovery contracts. Linux config isolation uses XDG_CONFIG_HOME;
 //! Windows known folders require a separate profile and are not redirected here.
 #![cfg(target_os = "linux")]

@@ -1,3 +1,6 @@
+// Copyright 2026 Ryan Duguid
+// SPDX-License-Identifier: Apache-2.0
+
 //! When capping saves too little, `rtk grep` must print grep's own output: the grouped form
 //! hides matches and clips lines, and the agent pays that back with a re-run.
 

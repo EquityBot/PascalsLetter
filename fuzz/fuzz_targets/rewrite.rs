@@ -1,3 +1,6 @@
+// Copyright 2026 Ryan Duguid
+// SPDX-License-Identifier: Apache-2.0
+
 //! A rewrite may change a command's words but never its shell structure: every operator,
 //! pipe, redirect and shellism the lexer sees in the command bash parses must survive, in
 //! order. The property test in src/discover/rewrite_properties.rs checks generated commands;
