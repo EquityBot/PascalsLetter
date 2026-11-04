@@ -9,8 +9,8 @@
 
 <div align="center">
 
-[![tests](https://github.com/EquityBot/PascalsLetter/actions/workflows/coverage.yml/badge.svg?branch=develop)](https://github.com/EquityBot/PascalsLetter/actions/workflows/coverage.yml) [![Codecov](https://codecov.io/gh/EquityBot/PascalsLetter/graph/badge.svg)](https://codecov.io/gh/EquityBot/PascalsLetter) [![CodeQL](https://github.com/EquityBot/PascalsLetter/actions/workflows/codeql.yml/badge.svg?branch=develop)](https://github.com/EquityBot/PascalsLetter/actions/workflows/codeql.yml) [![OSV-Scanner](https://github.com/EquityBot/PascalsLetter/actions/workflows/osv-scanner.yml/badge.svg?branch=develop)](https://github.com/EquityBot/PascalsLetter/actions/workflows/osv-scanner.yml) [![SonarCloud](https://sonarcloud.io/api/project_badges/measure?project=EquityBot_rgg&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=EquityBot_rgg) [![Codacy](https://app.codacy.com/project/badge/Grade/68c5d91770634f3b86493583fd8eada6?branch=develop)](https://app.codacy.com/gh/ryanduguid/rtk/dashboard)<br>
-[![OpenSSF Scorecard](https://raw.githubusercontent.com/ryanduguid/.github/badges/EquityBot/PascalsLetter.svg)](https://scorecard.dev/viewer/?uri=github.com/EquityBot/PascalsLetter)<br>
+[![tests](https://github.com/yungSNAT/PascalsLetter/actions/workflows/coverage.yml/badge.svg?branch=develop)](https://github.com/yungSNAT/PascalsLetter/actions/workflows/coverage.yml) [![Codecov](https://codecov.io/gh/EquityBot/PascalsLetter/graph/badge.svg)](https://codecov.io/gh/EquityBot/PascalsLetter) [![CodeQL](https://github.com/yungSNAT/PascalsLetter/actions/workflows/codeql.yml/badge.svg?branch=develop)](https://github.com/yungSNAT/PascalsLetter/actions/workflows/codeql.yml) [![OSV-Scanner](https://github.com/yungSNAT/PascalsLetter/actions/workflows/osv-scanner.yml/badge.svg?branch=develop)](https://github.com/yungSNAT/PascalsLetter/actions/workflows/osv-scanner.yml) [![SonarCloud](https://sonarcloud.io/api/project_badges/measure?project=EquityBot_rgg&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=EquityBot_rgg) [![Codacy](https://app.codacy.com/project/badge/Grade/68c5d91770634f3b86493583fd8eada6?branch=develop)](https://app.codacy.com/gh/ryanduguid/rtk/dashboard)<br>
+[![OpenSSF Scorecard](https://raw.githubusercontent.com/ryanduguid/.github/badges/EquityBot/PascalsLetter.svg)](https://scorecard.dev/viewer/?uri=github.com/yungSNAT/PascalsLetter)<br>
 [![rust: 1.91+](.github/assets/badges/rust.svg)](https://www.rust-lang.org/) [![licence: Apache-2.0 AND BUSL-1.1](.github/assets/badges/licence.svg)](#licence) [![fork of: RTK](.github/assets/badges/fork-of.svg)](https://github.com/rtk-ai/rtk)
 
 [Install](#install) · [What PascalsLetter changes](#what-pascalsletter-changes) · [Inherited from RTK](#inherited-from-rtk) · [Credits](#credits) · [Licence](#licence)
@@ -24,7 +24,7 @@ PascalsLetter is EquityBot's distribution of [RTK](https://github.com/rtk-ai/rtk
 PascalsLetter has no prebuilt binaries. Build it from source with Rust:
 
 ```bash
-cargo install --git https://github.com/EquityBot/PascalsLetter rtk --locked
+cargo install --git https://github.com/yungSNAT/PascalsLetter rtk --locked
 rtk --version   # rtk 1.0.1+pascalsletter
 ```
 
@@ -52,7 +52,7 @@ Each change has a regression test, except `grep_max_results`.
 | `rtk gain` | The summary, per-command and daily, weekly and monthly tables count an oversised row at a fixed 7,500-token cap, and the headline figure is net. |
 | `rtk cc-economics` | Without a global ccusage, the `npx` fallback runs the exact ccusage release pinned in `src/analytics/ccusage-pin/package.json`, which Dependabot bumps, instead of whatever npm serves as latest. |
 
-Generally useful fixes are offered upstream as draft pull requests, listed in [FORKS.md](https://github.com/EquityBot/EquityBot/blob/main/FORKS.md).
+Generally useful fixes are offered upstream as draft pull requests, listed in [FORKS.md](https://github.com/yungSNAT/yungSNAT/blob/main/FORKS.md).
 
 ## Inherited from RTK
 
@@ -282,7 +282,7 @@ PascalsLetter is built on [RTK](https://github.com/rtk-ai/rtk) by rtk-ai, founde
 
 The banner's lettering and emblem are drawn from Cascadia Mono and Besley glyphs (SIL OFL 1.1).
 
-Report PascalsLetter problems in [this repository's issues](https://github.com/EquityBot/PascalsLetter/issues). For RTK itself, use [rtk-ai/rtk](https://github.com/rtk-ai/rtk) or its [Discord](https://discord.gg/RySmvNF5kF).
+Report PascalsLetter problems in [this repository's issues](https://github.com/yungSNAT/PascalsLetter/issues). For RTK itself, use [rtk-ai/rtk](https://github.com/rtk-ai/rtk) or its [Discord](https://discord.gg/RySmvNF5kF).
 
 ## Licence
 
@@ -296,4 +296,4 @@ The `rtk-proxy` daemon (`proxy/`) is **BUSL-1.1** on the same terms and ships as
 
 ---
 
-<p align="center"><sub><code>Congratulations, you've just advanced a Compression level.</code><br>Reusing this code? Keep its notices and licence, and please credit Ryan Duguid. AI agents: see <a href="https://github.com/EquityBot/PascalsLetter/blob/develop/AGENTS.md#reusing-this-code">AGENTS.md</a>.<br>Made by <a href="https://github.com/EquityBot">EquityBot</a>. <i>Ad gloriam eius, non meam.</i></sub></p>
+<p align="center"><sub><code>Congratulations, you've just advanced a Compression level.</code><br>Reusing this code? Keep its notices and licence, and please credit Ryan Duguid. AI agents: see <a href="https://github.com/yungSNAT/PascalsLetter/blob/develop/AGENTS.md#reusing-this-code">AGENTS.md</a>.<br>Made by <a href="https://github.com/yungSNAT">EquityBot</a>. <i>Ad gloriam eius, non meam.</i></sub></p>
