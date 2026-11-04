@@ -79,24 +79,24 @@ fn sum_tool_output(provider: &impl SessionProvider, paths: &[PathBuf]) -> (ToolO
 /// Bash's share of all tool output, and what the figure covers. `rtk gain` has
 /// no such denominator: it counts only the commands RTK filtered.
 fn tool_output_report(output: &ToolOutputBytes, logs_read: usize, logs_total: usize) -> String {
-    if output.all == 0 {
-        return "No tool output logged in these sessions.".to_string();
-    }
-    let share = output.bash as f64 / output.all as f64 * 100.0;
-    let mut report = format!(
-        "Bash share of tool output: {:.0}% ({} of {} bytes, {} of {} sessions)\n  \
-         Only Bash reaches RTK's default hook, so `rtk gain` leaves out the rest.\n  \
-         Text in logged tool results, after any filtering. \
-         Images and subagent logs are not counted.",
-        share,
-        format_tokens(output.bash),
-        format_tokens(output.all),
-        logs_read,
-        logs_total,
-    );
+    let mut report = if output.all == 0 {
+        format!("No tool output logged in these sessions ({logs_read} of {logs_total} read).")
+    } else {
+        format!(
+            "Bash share of tool output: {:.0}% ({} of {} bytes, {} of {} sessions)\n  \
+             Only Bash reaches RTK's default hook, so `rtk gain` leaves out the rest.\n  \
+             Text in logged tool results, after any filtering. \
+             Images and subagent logs are not counted.",
+            output.bash as f64 / output.all as f64 * 100.0,
+            format_tokens(output.bash),
+            format_tokens(output.all),
+            logs_read,
+            logs_total,
+        )
+    };
     if output.unparsed_lines > 0 {
         report.push_str(&format!(
-            "\n  Log lines that did not parse, so are not counted: {}",
+            "\n  Log lines that could not be read, so are not counted: {}",
             output.unparsed_lines
         ));
     }
@@ -298,13 +298,27 @@ mod tests {
         assert!(
             report.starts_with("Bash share of tool output: 25% (1 of 4 bytes, 9 of 10 sessions)")
         );
-        assert!(report.ends_with("Log lines that did not parse, so are not counted: 2"));
+        assert!(report.ends_with("Log lines that could not be read, so are not counted: 2"));
     }
 
     #[test]
     fn test_tool_output_report_without_output() {
         let report = tool_output_report(&ToolOutputBytes::default(), 1, 1);
-        assert_eq!(report, "No tool output logged in these sessions.");
+        assert_eq!(
+            report,
+            "No tool output logged in these sessions (1 of 1 read)."
+        );
+    }
+
+    #[test]
+    fn test_tool_output_report_without_output_still_says_what_it_missed() {
+        let output = ToolOutputBytes {
+            unparsed_lines: 2,
+            ..ToolOutputBytes::default()
+        };
+        let report = tool_output_report(&output, 3, 10);
+        assert!(report.starts_with("No tool output logged in these sessions (3 of 10 read)."));
+        assert!(report.ends_with("could not be read, so are not counted: 2"));
     }
 
     // --- count_rtk_commands: core counting logic ---

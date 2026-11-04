@@ -4,7 +4,7 @@ use crate::hooks::init::resolve_claude_dir;
 use anyhow::{Context, Result};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use walkdir::WalkDir;
@@ -338,7 +338,18 @@ impl SessionProvider for ClaudeProvider {
         let mut unparsed_lines = 0;
 
         for line in BufReader::new(file).lines() {
-            let line = line.with_context(|| format!("failed to read {}", path.display()))?;
+            let line = match line {
+                Ok(line) => line,
+                Err(e) => {
+                    unparsed_lines += 1;
+                    // Bad bytes cost their line. A failed read would fail again, so stop there
+                    // and keep what was counted.
+                    if e.kind() == ErrorKind::InvalidData {
+                        continue;
+                    }
+                    break;
+                }
+            };
 
             if !line.contains("\"tool_use\"") && !line.contains("\"tool_result\"") {
                 continue;
@@ -713,6 +724,28 @@ mod tests {
                 bash: 3,
                 all: 3,
                 unparsed_lines: 0
+            }
+        );
+    }
+
+    #[test]
+    fn test_tool_output_bytes_keeps_the_lines_around_invalid_bytes() {
+        let mut jsonl = make_jsonl(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"abc"}]}}"#,
+        ]);
+        jsonl.write_all(b"\xE3 not text\n").unwrap();
+        let after = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"de"}]}}"#;
+        writeln!(jsonl, "{after}").unwrap();
+        jsonl.flush().unwrap();
+
+        let output = ClaudeProvider.tool_output_bytes(jsonl.path()).unwrap();
+        assert_eq!(
+            output,
+            ToolOutputBytes {
+                bash: 3,
+                all: 5,
+                unparsed_lines: 1
             }
         );
     }
