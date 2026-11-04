@@ -2,7 +2,7 @@
 
 use crate::hooks::init::resolve_claude_dir;
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -29,6 +29,17 @@ pub struct ExtractedCommand {
     pub sequence_index: usize,
 }
 
+/// Text bytes of tool output in a session log.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ToolOutputBytes {
+    /// Results of Bash calls.
+    pub bash: usize,
+    /// Results of every tool, Bash included.
+    pub all: usize,
+    /// Lines that mention a tool call or result but do not parse, so count for nothing.
+    pub unparsed_lines: usize,
+}
+
 /// Trait for session providers (Claude Code, OpenCode, etc.).
 ///
 /// Note: Cursor Agent transcripts use a text-only format without structured
@@ -41,9 +52,25 @@ pub trait SessionProvider {
         since_days: Option<u64>,
     ) -> Result<Vec<PathBuf>>;
     fn extract_commands(&self, path: &Path) -> Result<Vec<ExtractedCommand>>;
+    fn tool_output_bytes(&self, path: &Path) -> Result<ToolOutputBytes>;
 }
 
 pub struct ClaudeProvider;
+
+/// Text bytes of a `tool_result` block. `content` is a string for most tools and
+/// an array of blocks for others, such as MCP servers and subagents; a block with
+/// no text, such as an image, counts for nothing.
+fn tool_result_text_len(block: &serde_json::Value) -> usize {
+    match block.get("content") {
+        Some(serde_json::Value::String(text)) => text.len(),
+        Some(serde_json::Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| part.get("text")?.as_str())
+            .map(str::len)
+            .sum(),
+        _ => 0,
+    }
+}
 
 /// Substring match of a project filter against a project directory name.
 ///
@@ -300,6 +327,68 @@ impl SessionProvider for ClaudeProvider {
         }
 
         Ok(commands)
+    }
+
+    fn tool_output_bytes(&self, path: &Path) -> Result<ToolOutputBytes> {
+        let file =
+            fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+
+        let mut bash_ids: HashSet<String> = HashSet::new();
+        let mut results: HashMap<String, usize> = HashMap::new(); // tool_use_id to text bytes
+        let mut unparsed_lines = 0;
+
+        for line in BufReader::new(file).split(b'\n') {
+            // A failed read would fail again, so stop there and keep what was counted.
+            let Ok(line) = line else {
+                unparsed_lines += 1;
+                break;
+            };
+            let Ok(line) = String::from_utf8(line) else {
+                unparsed_lines += 1;
+                continue;
+            };
+
+            if !line.contains("\"tool_use\"") && !line.contains("\"tool_result\"") {
+                continue;
+            }
+
+            let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) else {
+                unparsed_lines += 1;
+                continue;
+            };
+
+            let Some(content) = entry.pointer("/message/content").and_then(|c| c.as_array()) else {
+                continue;
+            };
+
+            for block in content {
+                match block.get("type").and_then(|t| t.as_str()) {
+                    Some("tool_use")
+                        if block.get("name").and_then(|n| n.as_str()) == Some("Bash") =>
+                    {
+                        if let Some(id) = block.get("id").and_then(|i| i.as_str()) {
+                            bash_ids.insert(id.to_string());
+                        }
+                    }
+                    Some("tool_result") => {
+                        if let Some(id) = block.get("tool_use_id").and_then(|i| i.as_str()) {
+                            results.insert(id.to_string(), tool_result_text_len(block));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(ToolOutputBytes {
+            bash: results
+                .iter()
+                .filter(|(id, _)| bash_ids.contains(*id))
+                .map(|(_, len)| len)
+                .sum(),
+            all: results.values().sum(),
+            unparsed_lines,
+        })
     }
 }
 
@@ -615,5 +704,65 @@ mod tests {
         assert_eq!(cmds[0].command, "first");
         assert_eq!(cmds[1].command, "second");
         assert_eq!(cmds[2].command, "third");
+    }
+
+    #[test]
+    fn test_tool_output_bytes_counts_a_repeated_result_once() {
+        let jsonl = make_jsonl(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"abc"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"abc"}]}}"#,
+        ]);
+
+        let output = ClaudeProvider.tool_output_bytes(jsonl.path()).unwrap();
+        assert_eq!(
+            output,
+            ToolOutputBytes {
+                bash: 3,
+                all: 3,
+                unparsed_lines: 0
+            }
+        );
+    }
+
+    #[test]
+    fn test_tool_output_bytes_keeps_the_lines_around_invalid_bytes() {
+        let mut jsonl = make_jsonl(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"abc"}]}}"#,
+        ]);
+        jsonl.write_all(b"\xE3 not text\n").unwrap();
+        let after = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"de"}]}}"#;
+        writeln!(jsonl, "{after}").unwrap();
+        jsonl.flush().unwrap();
+
+        let output = ClaudeProvider.tool_output_bytes(jsonl.path()).unwrap();
+        assert_eq!(
+            output,
+            ToolOutputBytes {
+                bash: 3,
+                all: 5,
+                unparsed_lines: 1
+            }
+        );
+    }
+
+    #[test]
+    fn test_tool_output_bytes_reports_a_torn_line() {
+        let jsonl = make_jsonl(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"abc"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","conte"#,
+        ]);
+
+        let output = ClaudeProvider.tool_output_bytes(jsonl.path()).unwrap();
+        assert_eq!(
+            output,
+            ToolOutputBytes {
+                bash: 3,
+                all: 3,
+                unparsed_lines: 1
+            }
+        );
     }
 }
