@@ -207,7 +207,7 @@ async fn cli_subcommands_talk_to_a_running_daemon_then_stop_it() {
     // dropped by the server.
     let bad = Command::new(env!("CARGO_BIN_EXE_rtk-proxy"))
         .args(["config", "set", "--bind", &bind, "not_a_real_key", "x"])
-        .output()
+        .output() // NOSONAR: the daemon is a separate process, so blocking here (as run_cli does) stalls nothing
         .unwrap();
     assert!(!bad.status.success(), "unknown setting key should fail");
 
