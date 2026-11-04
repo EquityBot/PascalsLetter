@@ -1,0 +1,57 @@
+name: OSV-Scanner
+
+# Checks every dependency lockfile in the repository against the OSV database
+# with OSV-Scanner's reusable workflows, which need no account or token. The
+# full scan runs weekly, on pushes to develop that change a lockfile and on
+# demand, and fails on any known vulnerability; a pull request fails only on
+# vulnerabilities it adds. Results go to the Security tab.
+on:
+  schedule:
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [develop]
+    paths:
+      - "**/Cargo.lock"
+      - "**/package-lock.json"
+      - "**/requirements*.txt"
+      - ".github/workflows/osv-scanner.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.lock"
+      - "**/package-lock.json"
+      - "**/requirements*.txt"
+      - ".github/workflows/osv-scanner.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    name: OSV-Scanner
+    if: github.event_name != 'pull_request'
+    # The reusable workflow's job requests these; the caller must grant them.
+    permissions:
+      actions: read # Its SARIF upload reads this run's details.
+      contents: read
+      security-events: write # Upload the results to code scanning.
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+
+  scan-pr:
+    name: OSV-Scanner pull request
+    if: github.event_name == 'pull_request'
+    # The reusable workflow's job requests these; the caller must grant them.
+    permissions:
+      actions: read # Its SARIF upload reads this run's details.
+      contents: read
+      security-events: write # Upload the results to code scanning.
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+    with:
+      # A pull request from a fork gets a read-only token, so its results are
+      # not uploaded to code scanning; the check still fails on
+      # vulnerabilities it adds.
+      upload-sarif: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
