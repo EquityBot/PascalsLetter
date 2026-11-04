@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-Report a vulnerability in PascalsLetter privately with GitHub's [Report a vulnerability form](https://github.com/EquityBot/PascalsLetter/security/advisories/new). Include a clear description, safe reproduction steps, the impact and any suggested mitigation.
+Report a vulnerability in PascalsLetter privately with GitHub's [Report a vulnerability form](https://github.com/yungSNAT/PascalsLetter/security/advisories/new). Include a clear description, safe reproduction steps, the impact and any suggested mitigation.
 
 A vulnerability that upstream RTK shares can also go to RTK's maintainers, as [RTK's security policy](https://github.com/rtk-ai/rtk/blob/develop/SECURITY.md) describes.
 
