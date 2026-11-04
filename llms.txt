@@ -4,7 +4,7 @@
 > compresses command output before it reaches a coding agent's context. It has no prebuilt
 > binaries and installs a binary named `rtk`, as upstream RTK does, so uninstall any other RTK copy first.
 
-Version `1.0.1+pascalsletter`, built from source with
+Version `1.1.0+pascalsletter`, built from source with
 `cargo install --git https://github.com/EquityBot/PascalsLetter rtk --locked`. Add
 `--no-default-features` for the Apache-2.0-only build without the compression engine.
 
