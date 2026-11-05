@@ -13,7 +13,7 @@
 [![OpenSSF Scorecard](https://raw.githubusercontent.com/ryanduguid/.github/badges/EquityBot/PascalsLetter.svg)](https://scorecard.dev/viewer/?uri=github.com/yungSNAT/PascalsLetter)<br>
 [![rust: 1.91+](.github/assets/badges/rust.svg)](https://www.rust-lang.org/) [![licence: Apache-2.0 AND BUSL-1.1](.github/assets/badges/licence.svg)](#licence) [![fork of: RTK](.github/assets/badges/fork-of.svg)](https://github.com/rtk-ai/rtk)
 
-[Install](#install) · [What PascalsLetter changes](#what-pascalsletter-changes) · [Inherited from RTK](#inherited-from-rtk) · [Credits](#credits) · [Licence](#licence)
+[Install](#install) · [Use](#use) · [What PascalsLetter changes](#what-pascalsletter-changes) · [Inherited from RTK](#inherited-from-rtk) · [Development](#development) · [Credits](#credits) · [Licence](#licence)
 
 </div>
 
@@ -29,6 +29,10 @@ rtk --version   # rtk 1.1.0+pascalsletter
 ```
 
 PascalsLetter and upstream RTK both install `rtk`, so uninstall any Homebrew, winget or `install.sh` copy of RTK first. Add `--no-default-features` for the Apache-2.0-only build without the compression engine. Then set up your agent with `rtk init` as in [Quick Start](#quick-start). The `rtk-proxy` daemon is a separate package that this command does not install; build it with `cargo build --release --manifest-path proxy/Cargo.toml`.
+
+## Use
+
+Run `rtk init -g` to set up Claude Code; add `--copilot` for GitHub Copilot in VS Code. [Inherited from RTK](#inherited-from-rtk) covers the commands and other agents.
 
 ## What PascalsLetter changes
 
@@ -90,7 +94,7 @@ RTK reduces the **bash output** your agent reads. That is what RTK measures, and
 
 Bash output is **one contributor to input tokens**, alongside your prompt, the system prompt and conversation history. Input tokens are in turn **only part of the bill**, which also counts output tokens. The reduction dilutes at every step.
 
-The token counts RTK reports are estimated as `bytes / 4` — RTK ships no tokenizer, so the **percentages are reliable but the absolute token numbers are approximate**.
+The token counts RTK reports are estimated as `bytes / 4`: RTK ships no tokenizer, so the **percentages are reliable but the absolute token numbers are approximate**.
 
 > Full explanation: [How RTK Savings Work](docs/guide/resources/savings-explained.md)
 
@@ -153,7 +157,7 @@ RTK supports 18 AI coding tools. Each integration rewrites shell commands to `rt
 | Tool | Install | Method |
 |------|---------|--------|
 | **Claude Code** | `rtk init -g` | PreToolUse hook (native binary) |
-| **GitHub Copilot (VS Code)** | `rtk init -g --copilot` | PreToolUse hook — transparent rewrite |
+| **GitHub Copilot (VS Code)** | `rtk init -g --copilot` | PreToolUse hook, transparent rewrite |
 | **GitHub Copilot CLI** | `rtk init -g --copilot` | PreToolUse deny-with-suggestion (CLI limitation) |
 | **Cursor** | `rtk init -g --agent cursor` | preToolUse hook (hooks.json) |
 | **Gemini CLI** | `rtk init -g --gemini` | BeforeTool hook |
@@ -195,11 +199,11 @@ rtk bypass npm install express          # raw npm output, no filtering
 rtk bypass curl https://api.example.com/data
 ```
 
-- **What it does**: runs one command unfiltered and still tracks it — bypassed commands appear in `rtk gain --history` with 0% bash output reduction.
+- **What it does**: runs one command unfiltered and still tracks it: bypassed commands appear in `rtk gain --history` with 0% bash output reduction.
 - **When to use it**: an output looks off and you need to know whether the filter or the command produced it, when debugging a filter, or for an edge case a filter mishandles.
 - `rtk proxy <cmd>` is a deprecated alias of `rtk bypass <cmd>`.
 
-> **Not the same thing as `rtk llm-proxy`.** `rtk bypass` runs one local command unfiltered. `rtk llm-proxy` manages the `rtk-proxy` daemon, which compresses your agent's provider-API traffic — see [RTK Proxy](#rtk-proxy-optional).
+> **Not the same thing as `rtk llm-proxy`.** `rtk bypass` runs one local command unfiltered. `rtk llm-proxy` manages the `rtk-proxy` daemon, which compresses your agent's provider-API traffic. See [RTK Proxy](#rtk-proxy-optional).
 
 ### Measure It
 
@@ -220,7 +224,7 @@ rtk session                     # Show RTK adoption across recent sessions
 
 ### RTK Proxy (optional)
 
-`rtk` optimizes **command output** before your agent reads it. The `rtk-proxy` daemon extends the same engine to your agent's **provider-API traffic** — a local background process that sits between your agent and the provider and runs the pipeline on the traffic itself: it **compresses** payloads, strips bytes no model ever needed before forwarding, and carries the calls your pipeline routes to cheaper models, so they borrow the credential your agent already sends and show up in `rtk gain`. It can also align prompt-cache breakpoints where the agent leaves them open (opt-in).
+`rtk` optimizes **command output** before your agent reads it. The `rtk-proxy` daemon extends the same engine to your agent's **provider-API traffic**: a local background process that sits between your agent and the provider and runs the pipeline on the traffic itself: it **compresses** payloads, strips bytes no model ever needed before forwarding, and carries the calls your pipeline routes to cheaper models, so they borrow the credential your agent already sends and show up in `rtk gain`. It can also align prompt-cache breakpoints where the agent leaves them open (opt-in).
 
 ```bash
 rtk claude              # start the daemon if needed, then launch Claude through it
@@ -232,10 +236,10 @@ rtk gain                # savings, command-filtering and proxy side by side
 
 | | What it does |
 |---|---|
-| `rtk init -g` | Offers to set it up once: writes the base URL and the `rtk:proxy` pipeline, then asks how the daemon should come back after a reboot — SessionStart hook, background service, or neither. |
+| `rtk init -g` | Offers to set it up once: writes the base URL and the `rtk:proxy` pipeline, then asks how the daemon should come back after a reboot: SessionStart hook, background service, or neither. |
 | `rtk <harness>` | No configuration at all. Starts the daemon, points the harness at it, then execs it. Needs no hook system, which is why it covers harnesses that have none. |
 
-`rtk <harness>` resolving is itself the signal that traffic really goes through the daemon — the subcommand exists only where redirection is verified. Today that is `rtk claude`. A harness without one is never silently unproxied: it falls through to plain passthrough, and `rtk llm-proxy setup` lists what can be launched.
+`rtk <harness>` resolving is itself the signal that traffic really goes through the daemon: the subcommand exists only where redirection is verified. Today that is `rtk claude`. A harness without one is never silently unproxied: it falls through to plain passthrough, and `rtk llm-proxy setup` lists what can be launched.
 
 It is a separate binary under a separate licence (BUSL-1.1), built on its own from `proxy/`; `rtk` never links it.
 
@@ -243,7 +247,7 @@ It is a separate binary under a separate licence (BUSL-1.1), built on its own fr
 
 ### The Engine (`pipeline.toml`)
 
-Everything RTK does — which commands get rewritten, what happens to a tool's output, what the proxy compresses — is expressed in one composable file. The engine (`engine/`, crate `rtk-engine`, BUSL-1.1) reads it, so the levers are configurable instead of hard-coded.
+Everything RTK does (which commands get rewritten, what happens to a tool's output, what the proxy compresses) is expressed in one composable file. The engine (`engine/`, crate `rtk-engine`, BUSL-1.1) reads it, so the levers are configurable instead of hard-coded.
 
 **Upgrading changes nothing.** With no pipeline file you are on `rtk:default`: the same PreToolUse rewrite, the same awareness file, your `filters.toml`, your `config.toml`. Everything beyond that is opt-in, one line at a time:
 
@@ -276,7 +280,11 @@ The full user guide starts at **[docs/guide](docs/guide/index.md)**.
 
 Repository references: [engine/README.md](engine/README.md) · [proxy/README.md](proxy/README.md) · [ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md) · [CONTRIBUTING.md](CONTRIBUTING.md) · [SECURITY.md](SECURITY.md)
 
-RTK collects **no command content and no file contents**. Telemetry is anonymous and **off by default** — it sends nothing until you opt in with explicit consent (GDPR Art. 6 & 7) via `rtk telemetry enable`, and documented in [Telemetry & Privacy](docs/guide/resources/telemetry.md).
+RTK collects **no command content and no file contents**. Telemetry is anonymous and **off by default**: it sends nothing until you opt in with explicit consent (GDPR Art. 6 & 7) via `rtk telemetry enable`, and documented in [Telemetry & Privacy](docs/guide/resources/telemetry.md).
+
+## Development
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the tests a change needs, and [ARCHITECTURE.md](docs/contributing/ARCHITECTURE.md) covers how the code fits together.
 
 ## Credits
 
