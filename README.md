@@ -47,7 +47,7 @@ Each change has a regression test, except `grep_max_results`.
 | `yadm` | Removed from the `git` rewrite rule, which would run git on the current project instead of yadm's dotfiles repository. It goes through `rtk yadm`, and `rtk discover` lists it as unhandled, as it does `jq` and other commands with only a TOML filter. From [kylehgc/rtk](https://github.com/kylehgc/rtk/commit/1d672725f8cf9d43da32212310dd7abb5bca814d) by RawNuke (Apache-2.0); see [rtk-ai/rtk#3408](https://github.com/rtk-ai/rtk/issues/3408). |
 | PHP tool paths | A tool path the shell expands or that holds shell syntax, such as `$ROOT/vendor/bin/phpunit` or `~/x/vendor/bin/pint`, is no longer cut down to the bare tool, which ran the current project's copy instead of the one the path names. Found by the `rewrite` fuzz target. |
 | Unusual whitespace | A command holding whitespace Bash does not split words at, such as a vertical tab or a no-break space, runs as written. The rewriter split there, which could turn `>&2` into a redirect of another descriptor. Found by the `rewrite` fuzz target. |
-| `rtk-proxy` key lending | The relayed provider key is lent only to a keyless request carrying the `x-rtk-proxy` header (which `rtk task` sends) with a `localhost` or IP `Host`, so a web page, including a DNS-rebound one, cannot spend it. |
+| `rtk-proxy` key lending | The relayed provider key is lent only to a keyless request carrying the `x-rtk-proxy` header (which `rtk <task>` sends) with a `localhost` or IP `Host`, so a web page, including a DNS-rebound one, cannot spend it. |
 | `rtk-proxy` health check | A server on the proxy port that answers and hangs up early reads as not the proxy. On macOS the check, which the session-start hook also runs, could panic inside ureq instead ([rtk-ai/rtk#4912](https://github.com/rtk-ai/rtk/issues/4912)). |
 | `rtk gain` | The summary, per-command and daily, weekly and monthly tables count an oversised row at a fixed 7,500-token cap, and the headline figure is net. |
 | `rtk session` | Ends with Bash's share of all tool output in recent sessions, the denominator `rtk gain` lacks, and says what the figure leaves out. |
@@ -99,7 +99,8 @@ The token counts RTK reports are estimated as `bytes / 4` — RTK ships no token
 
 ```bash
 # 1. Install for your AI tool
-rtk init -g                     # Claude Code / Copilot (default)
+rtk init -g                     # Claude Code (default)
+rtk init -g --copilot           # GitHub Copilot
 rtk init -g --gemini            # Gemini CLI
 rtk init -g --codex             # Codex (OpenAI)
 rtk init -g --agent cursor      # Cursor
@@ -236,7 +237,7 @@ rtk gain                # savings, command-filtering and proxy side by side
 
 `rtk <harness>` resolving is itself the signal that traffic really goes through the daemon — the subcommand exists only where redirection is verified. Today that is `rtk claude`. A harness without one is never silently unproxied: it falls through to plain passthrough, and `rtk llm-proxy setup` lists what can be launched.
 
-It is a separate binary under a separate licence (BUSL-1.1), shipped as its own `rtk-proxy-<target>` archive — `rtk` never links it.
+It is a separate binary under a separate licence (BUSL-1.1), built on its own from `proxy/`; `rtk` never links it.
 
 > Setup and subcommands: **[RTK Proxy](docs/guide/proxy/overview.md)** · what it compresses: **[What the Proxy Compresses](docs/guide/proxy/compression.md)** · settings and endpoints: **[Proxy Configuration](docs/guide/proxy/configuration.md)**
 
@@ -291,7 +292,7 @@ The `rtk` CLI is **Apache-2.0**: see [LICENSE](LICENSE).
 
 It links one component under a different licence. `rtk-engine` (`engine/`) is **BUSL-1.1**, source-available: see [engine/LICENSE](engine/LICENSE). Its Additional Use Grant permits production use as part of the `rtk` binary, so running `rtk` is covered; using the engine on its own, or inside another product, is not until the Change Date.
 
-The `rtk-proxy` daemon (`proxy/`) is **BUSL-1.1** on the same terms and ships as its own archive with its licence alongside; `rtk` never links it.
+The `rtk-proxy` daemon (`proxy/`) is **BUSL-1.1** on the same terms, built on its own with its licence alongside; `rtk` never links it.
 
 [Editions and Licensing](docs/guide/resources/editions.md) sets out what the Apache-2.0-only build omits and where the BUSL-1.1 grant stops. See also [DISCLAIMER.md](DISCLAIMER.md).
 
