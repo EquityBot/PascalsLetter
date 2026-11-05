@@ -1,11 +1,15 @@
 # RTK Installation Guide - For AI Coding Assistants
 
+> **PascalsLetter builds from source.** This guide comes from upstream RTK, and PascalsLetter has no prebuilt binaries yet.
+> Install it with `cargo install --git https://github.com/yungSNAT/PascalsLetter rtk --locked`.
+> The curl, Homebrew and winget routes below install upstream RTK, without PascalsLetter's changes.
+
 ## ⚠️ Name Collision Warning
 
 **There are TWO completely different projects named "rtk":**
 
 1. ✅ **Rust Token Killer** (this project) - LLM token optimizer
-   - Repos: `rtk-ai/rtk`
+   - Repos: `rtk-ai/rtk`, and this distribution, `yungSNAT/PascalsLetter`
    - Has `rtk gain` command showing the savings dashboard
 
 2. ❌ **Rust Type Kit** (reachingforthejack/rtk) - DIFFERENT PROJECT
@@ -61,8 +65,8 @@ winget install rtk-ai.rtk
 ### Alternative: Manual Installation
 
 ```bash
-# From rtk-ai repository (NOT reachingforthejack!)
-cargo install --git https://github.com/rtk-ai/rtk rtk
+# From this repository (NOT reachingforthejack!)
+cargo install --git https://github.com/yungSNAT/PascalsLetter rtk --locked
 
 # ALWAYS VERIFY after installation
 rtk gain  # MUST show the savings dashboard, not "command not found"
@@ -79,7 +83,7 @@ your policy does not allow a source-available licence in the build.
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | RTK_EDITION=oss sh
 brew install rtk-ai/tap/rtk-oss
-cargo install --git https://github.com/rtk-ai/rtk rtk --no-default-features
+cargo install --git https://github.com/yungSNAT/PascalsLetter rtk --locked --no-default-features
 ```
 
 Release assets are named `rtk-oss-<target>`, plus `rtk-oss_amd64.deb` and
@@ -196,7 +200,7 @@ rtk init --show
 ### First-Time User (Recommended)
 ```bash
 # 1. Install RTK
-cargo install --git https://github.com/rtk-ai/rtk rtk
+cargo install --git https://github.com/yungSNAT/PascalsLetter rtk --locked
 rtk gain  # Verify (must show the savings dashboard)
 
 # 2. Setup with prompts
@@ -372,7 +376,7 @@ source ~/.bashrc  # or source ~/.zshrc
 ### RTK command not available (e.g., vitest)
 ```bash
 # Update to the latest release, then check the version
-cargo install --git https://github.com/rtk-ai/rtk rtk --force
+cargo install --git https://github.com/yungSNAT/PascalsLetter rtk --locked --force
 rtk --version
 ```
 
