@@ -91,7 +91,9 @@ fn try_wrap_with_probes(
     // sees no redirect and no substitution at all while the classifier, reading
     // the stripped code, sees clean fish.
     let code = strip_comments(script)?;
-    if lexer::contains_unattestable_construct(&code) || contains_fish_substitution(&code) {
+    if lexer::unattestable_either_reading(&code, lexer::ShellDialect::Posix)
+        || contains_fish_substitution(&code)
+    {
         return None;
     }
     // `&|` pipes stdout and stderr in fish, and `&` opens the same kind of
@@ -560,6 +562,16 @@ mod tests {
                 "rtk run --shell fish -c 'if test -d src\n  git status\nelse\n  echo missing\nend'"
             )
         );
+    }
+
+    /// A `#` fish keeps as code and bash reads as a comment: the wrap refuses
+    /// what either reading refuses.
+    #[cfg(not(windows))]
+    #[test]
+    fn test_refuses_a_script_the_comment_readings_refuse() {
+        let script = "if test -d src\n  git status \\\n# > /tmp/x\nend";
+        assert!(is_unambiguous_fish(script));
+        assert_eq!(try_wrap_gated(script, true), None);
     }
 
     #[cfg(not(windows))]

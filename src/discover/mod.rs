@@ -191,7 +191,7 @@ fn estimate_hook_coverage_with_verdict(
 ) -> bool {
     ctx.hook_installed
         && !matches!(verdict, PermissionVerdict::Deny | PermissionVerdict::Defer)
-        && !lexer::contains_unattestable_construct(permission_cmd)
+        && !lexer::unattestable_either_reading(permission_cmd, lexer::ShellDialect::Posix)
         && registry::rewrite_command_precompiled(
             rewrite_cmd,
             &ctx.exclude_patterns,
@@ -754,6 +754,16 @@ mod tests {
             "env bash -c 'git push'",
             "env bash -c 'git push'",
             PermissionVerdict::Ask,
+            &test_ctx(true),
+        ));
+    }
+
+    #[test]
+    fn test_estimate_hook_coverage_false_for_a_refused_comment() {
+        assert!(!estimate_hook_coverage_with_verdict(
+            "git status # `id`",
+            "git status # `id`",
+            PermissionVerdict::Default,
             &test_ctx(true),
         ));
     }

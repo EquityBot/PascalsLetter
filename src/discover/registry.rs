@@ -8,9 +8,9 @@ use std::sync::{LazyLock, OnceLock};
 
 use super::lexer::{
     ParsedToken, PipeKind, QuoteScan, TokenKind, advance_quote_state, ansi_c_quote_defeats_lexer,
-    coalesce_words, contains_unattestable_construct_in, is_crlf_at, is_heredoc_redirect,
+    blank_comments, coalesce_words, comment_readings_disagree, is_crlf_at, is_heredoc_redirect,
     is_word_boundary_whitespace, redirect_has_file_target, shell_split, split_on_operators,
-    tokenize, tokenize_with_newlines,
+    tokenize, tokenize_with_newlines, unattestable_either_reading,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use super::shell_wrapper::parse_shell_wrapper;
@@ -822,13 +822,14 @@ fn line_continuation_quoting_unknown(s: &str) -> bool {
 /// command. Bash deletes `\<NL>` outright, so one inside a word joins it
 /// (`git sta\<NL>tus` runs `git status`); outside quotes, one with whitespace
 /// beside it becomes a single space, and inside double quotes only the `\<NL>`
-/// goes. Inside single quotes, or after a backslash that escapes this one
-/// (`\\<NL>`), it is no continuation and stays as written. A `\<CR><NL>`, which
-/// bash does not continue, still becomes a single space outside those two
-/// places, as it always has. Returns a borrowed `&str` when the input contains
+/// goes. Inside single quotes, after a backslash that escapes this one
+/// (`\\<NL>`) or in a comment, which the newline ends whatever comes before it,
+/// it is no continuation and stays as written. A `\<CR><NL>`, which bash does
+/// not continue, still becomes a single space outside those places, as it
+/// always has. Returns a borrowed `&str` when the input contains
 /// no continuations, so the common fast path allocates nothing.
 pub(crate) fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
-    collapse_continuations(s, true)
+    collapse_continuations(s, true, true)
 }
 
 /// [`collapse_line_continuations`], but inside single quotes as well, for the
@@ -837,14 +838,28 @@ pub(crate) fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> 
 /// RTK can read. Removing one bash would keep can only merge words, and that
 /// check gives `Defer` or `Ask`, never `Allow`.
 pub(crate) fn collapse_line_continuations_ignoring_quotes(s: &str) -> std::borrow::Cow<'_, str> {
-    collapse_continuations(s, false)
+    collapse_continuations(s, false, true)
 }
 
-fn collapse_continuations(s: &str, track_quotes: bool) -> std::borrow::Cow<'_, str> {
+/// [`collapse_line_continuations_ignoring_quotes`] with comment text read as code,
+/// for the gate's other reading (see [`gate_segments`]).
+///
+/// [`gate_segments`]: super::lexer::gate_segments
+pub(crate) fn collapse_ignoring_quotes_and_comments(s: &str) -> std::borrow::Cow<'_, str> {
+    collapse_continuations(s, false, false)
+}
+
+fn collapse_continuations(
+    s: &str,
+    track_quotes: bool,
+    track_comments: bool,
+) -> std::borrow::Cow<'_, str> {
     if !s.contains('\\') {
         return std::borrow::Cow::Borrowed(s);
     }
-    let live = line_continuations(s, track_quotes);
+    // Where shells disagree about a `#` the raw text is read, and callers refuse it.
+    let code = track_comments.then(|| blank_comments(s)).flatten();
+    let live = line_continuations(code.as_deref().unwrap_or(s), track_quotes);
     LINE_CONTINUATION_RE.replace_all(s, |caps: &regex::Captures<'_>| {
         let m = caps.get(0).expect("group 0 always matches");
         let text = m.as_str();
@@ -915,6 +930,10 @@ pub(crate) fn rewrite_command_precompiled(
         .chars()
         .any(|c| c.is_whitespace() && c != '\r' && !is_word_boundary_whitespace(c))
     {
+        return None;
+    }
+
+    if comment_readings_disagree(cmd) {
         return None;
     }
 
@@ -1859,7 +1878,8 @@ fn rewrite_shell_wrapper(
         // The wrapper names the shell, so the script is checked under that
         // shell's grammar: fish's `(cmd)` substitution and `and`/`or`/`end`
         // control flow defer here, where bash's subshells and keywords do not.
-        || contains_unattestable_construct_in(script, wrapper.dialect())
+        || unattestable_either_reading(script, wrapper.dialect())
+        || comment_readings_disagree(script)
     {
         return None;
     }
@@ -8694,6 +8714,69 @@ mod tests {
         assert_eq!(collapse_line_continuations("ls\\\\\npwd"), "ls\\\\\npwd");
         assert_eq!(collapse_line_continuations("ls\\\\\\\npwd"), "ls\\\\pwd");
         assert_eq!(collapse_line_continuations("git \\\n  diff"), "git diff");
+    }
+
+    #[test]
+    fn test_backslash_ending_a_comment_keeps_the_next_line() {
+        // #4029: bash ends a comment at the newline, so the backslash continues
+        // nothing and both commands run. Joining them put `rm x` in the comment.
+        for cmd in [
+            "git status # n \\\nrm x",
+            "git status # n\\\nrm x",
+            "git status # it's all good, man \\\nrm x",
+            "git status # n \\\r\nrm x",
+            "git log -3\ngit status # n \\\nrm x",
+            "# n \\\nrm x",
+        ] {
+            assert_eq!(
+                collapse_line_continuations(cmd),
+                cmd,
+                "{cmd:?} lost its line break"
+            );
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
+    }
+
+    #[test]
+    fn test_continuations_outside_comments_still_collapse() {
+        for (cmd, collapsed) in [
+            ("git \\\n  diff # n", "git diff # n"),
+            // A `#` opens no comment inside a word, quotes or an escape.
+            ("echo a#b \\\nc", "echo a#b c"),
+            ("echo '#' \\\nc", "echo '#' c"),
+            ("echo \"# a\\\nb\"", "echo \"# ab\""),
+            ("echo \\# \\\nc", "echo \\# c"),
+            // An apostrophe in a comment no longer opens a quote for later lines.
+            ("ls # it's\ngit \\\n  diff", "ls # it's\ngit diff"),
+        ] {
+            assert_eq!(collapse_line_continuations(cmd), collapsed, "{cmd:?}");
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("git \\\n  diff # n", &[]),
+            Some("rtk git diff # n".into())
+        );
+    }
+
+    #[test]
+    fn test_comment_readings_that_disagree_are_not_rewritten() {
+        for cmd in [
+            "ls (#i)foo \\\nrm x",
+            "git status # x\ry \\\nrm x",
+            "ls (a)\\\n#; rm -rf y",
+            "echo $\\\n{x:- #}; rm -rf y",
+            "git status # a; rm x",
+            "bash -c \"git status # a; rm x\"",
+            "git status ${x:-{} # n \\\ngit log",
+            "git status ((${x:-(})) # n \\\ngit log",
+            "bash -c 'git status ${x:-{} # n \\\ngit log'",
+            "bash -c 'git status # `id`'",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("git status # a note", &[]),
+            Some("rtk git status # a note".into())
+        );
     }
 
     #[test]

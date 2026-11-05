@@ -1,7 +1,7 @@
 use super::constants::{CONFIG_DIR, OPENCODE_SUBDIR};
-use super::permissions::PermissionVerdict;
+use super::permissions::{PermissionVerdict, normalize_command_text};
 use crate::core::user_dirs;
-use crate::discover::lexer::{contains_unattestable_construct, split_for_permissions};
+use crate::discover::lexer::{ShellDialect, gate_segments, unattestable_either_reading};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -89,17 +89,24 @@ pub(crate) fn evaluate(cmd: &str, rules: &[Rule]) -> Option<Action> {
 }
 
 pub(crate) fn check_command_with_opencode_rules(cmd: &str, rules: &[Rule]) -> PermissionVerdict {
-    // `split_for_permissions` returns trimmed, non-empty segments only.
-    let actions: Vec<Option<Action>> = split_for_permissions(cmd)
+    // `gate_segments` returns trimmed, non-empty segments only. A rule names the
+    // command the shell runs, so a segment is also read with its line
+    // continuations joined; the verdict only rises as readings are added.
+    let actions: Vec<Option<Action>> = gate_segments(cmd)
         .iter()
-        .map(|segment| evaluate(segment, rules))
+        .flat_map(|segment| {
+            [
+                evaluate(segment, rules),
+                evaluate(&normalize_command_text(segment), rules),
+            ]
+        })
         .collect();
 
     if actions.contains(&Some(Action::Deny)) {
         return PermissionVerdict::Deny;
     }
 
-    if contains_unattestable_construct(cmd) {
+    if unattestable_either_reading(cmd, ShellDialect::Posix) {
         return PermissionVerdict::Ask;
     }
 
@@ -549,6 +556,45 @@ mod tests {
         assert_eq!(
             check_command_with_opencode_rules("echo $(rm -rf /)", &rules),
             PermissionVerdict::Ask
+        );
+    }
+
+    #[test]
+    fn the_gate_reads_a_comment_both_ways() {
+        let rules = [rule("*", Action::Allow), rule("rm *", Action::Deny)];
+        for cmd in ["ls # a; rm -rf y", "ls # it's\nrm -rf y"] {
+            assert_eq!(
+                check_command_with_opencode_rules(cmd, &rules),
+                PermissionVerdict::Deny,
+                "{cmd:?}"
+            );
+        }
+        assert_eq!(
+            check_command_with_opencode_rules("git status # $(id)", &rules),
+            PermissionVerdict::Ask
+        );
+    }
+
+    #[test]
+    fn rules_see_past_a_line_continuation() {
+        let rules = [rule("*", Action::Allow), rule("rm *", Action::Deny)];
+        for cmd in ["\\\nrm -rf y", "r\\\nm -rf y", "ls # a \\\nr\\\nm -rf y"] {
+            assert_eq!(
+                check_command_with_opencode_rules(cmd, &rules),
+                PermissionVerdict::Deny,
+                "{cmd:?}"
+            );
+        }
+        let git = [rule("git *", Action::Allow)];
+        assert_eq!(
+            check_command_with_opencode_rules("git status \\\n--short", &git),
+            PermissionVerdict::Allow
+        );
+        // A rule that spells the command's spacing still matches it as written.
+        let spaced = [rule("echo  x", Action::Deny)];
+        assert_eq!(
+            check_command_with_opencode_rules("echo  x", &spaced),
+            PermissionVerdict::Deny
         );
     }
 

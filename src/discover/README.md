@@ -50,12 +50,14 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 | `tokenize(cmd)` | Full shell-syntax tokens: quotes, escapes, operators, pipes, redirects, shellisms | — |
 | `tokenize_with_newlines(cmd)` | Like `tokenize`, plus a `\n` `Operator` token per unquoted newline (a lone `\r` stays glued to its word, matching real bash) | — |
 | `shell_split(cmd)` | Quote-aware split into argv-ready words (quotes stripped, escapes resolved) | `hooks/mod.rs::is_claude_hook_command`, `main.rs`'s `rtk bypass '...'` |
-| `split_for_permissions(cmd)` | Segments a compound command for the **permission gate** — deliberately the most conservative of three segmenters (see its doc comment for the full comparison table) | `hooks/permissions.rs::check_command_with_rules` |
+| `split_for_permissions(cmd)` | Segments a compound command for the **permission gate** — deliberately the most conservative of three segmenters (see its doc comment for the full comparison table) | `gate_segments` in this module |
+| `gate_segments(cmd)` | The gate's two readings of a command together: comment text blanked (`split_for_permissions`) and read as code. The gate checks the commands of both | `hooks/permissions.rs`, `hooks/permissions_opencode.rs` |
 | `split_for_classify(cmd)` | Segments for classification only — not safe for permission/security decisions | — (`pub(crate)`; its caller `registry.rs::split_command_chain` is this module) |
-| `contains_unattestable_construct(cmd)` | True for command/process substitution, quoting the lexer reads differently from bash (`$'\''`), or a file-target redirect — constructs the permission gate can't decompose and must never auto-allow | `hooks/permissions.rs::check_command_with_rules` |
-| `contains_unattestable_construct_in(cmd, dialect)` | The same check for a string whose shell is known — adds fish's `(cmd)` substitution and command-position control keywords | `registry.rs::rewrite_shell_wrapper` (fish `-c` scripts only) |
+| `contains_unattestable_construct(cmd)` | True for command/process substitution, quoting the lexer reads differently from bash (`$'\''`), a heredoc, or a file-target redirect — constructs the permission gate can't decompose and must never auto-allow. Reads comments as blanked; test builds only | — |
+| `contains_unattestable_construct_in(cmd, dialect)` | The same check for a string whose shell is known — adds fish's `(cmd)` substitution and command-position control keywords | — |
+| `unattestable_either_reading(cmd, dialect)` | True when either of the gate's readings refuses the command | `hooks/permissions.rs`, `hooks/permissions_opencode.rs`, `hooks/decision.rs`, `hooks/hook_cmd.rs` |
 
-The permission gate, discover/analytics classification, and rewrite each segment compound commands (`&&`, `;`, `|`, background `&`, subshells) slightly differently on purpose — the gate must never under-segment (a hidden command could evade a deny rule), while rewrite and analytics only need to reproduce or classify the command's actual shape. Don't reuse `split_for_classify` or `rewrite_compound`'s segmenting for a permission/security decision; use `split_for_permissions`.
+The permission gate, discover/analytics classification, and rewrite each segment compound commands (`&&`, `;`, `|`, background `&`, subshells) slightly differently on purpose — the gate must never under-segment (a hidden command could evade a deny rule), while rewrite and analytics only need to reproduce or classify the command's actual shape. Don't reuse `split_for_classify` or `rewrite_compound`'s segmenting for a permission/security decision; use `gate_segments`.
 
 ## How History Analysis Works
 

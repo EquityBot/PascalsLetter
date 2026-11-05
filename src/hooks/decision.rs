@@ -286,7 +286,10 @@ fn decide_with_attestation(
         );
     }
 
-    if crate::discover::lexer::contains_unattestable_construct(cmd) {
+    if crate::discover::lexer::unattestable_either_reading(
+        cmd,
+        crate::discover::lexer::ShellDialect::Posix,
+    ) {
         return HookDecision::Defer;
     }
 
@@ -592,6 +595,19 @@ mod tests {
         assert!(!in_claude_worktree("/repo/.claude/worktrees"));
         assert!(!in_claude_worktree("/repo/worktrees/feat-x"));
         assert!(!in_claude_worktree("/repo/.claude/skills/feat-x"));
+    }
+
+    #[test]
+    fn either_reading_of_a_comment_can_defer() {
+        assert_eq!(
+            decide_for_agent_at(
+                "git status # `id`",
+                PermissionVerdict::Allow,
+                DenyRules::Unattested,
+                None
+            ),
+            HookDecision::Defer
+        );
     }
 
     #[test]
