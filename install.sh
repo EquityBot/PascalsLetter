@@ -4,6 +4,9 @@
 
 set -e
 
+# PascalsLetter has no releases yet, so this script still downloads upstream's.
+echo "Note: this installs upstream RTK, not PascalsLetter. For PascalsLetter: cargo install --git https://github.com/yungSNAT/PascalsLetter rtk --locked" >&2
+
 REPO="rtk-ai/rtk"
 BINARY_NAME="rtk"
 # RTK_EDITION=oss installs the Apache-2.0 edition: the same `rtk` binary built

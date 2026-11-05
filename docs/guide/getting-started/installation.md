@@ -7,6 +7,16 @@ sidebar:
 
 # Installation
 
+:::caution[PascalsLetter builds from source]
+This page comes from upstream RTK. PascalsLetter has no prebuilt binaries yet, so install it with Cargo:
+
+```bash
+cargo install --git https://github.com/yungSNAT/PascalsLetter rtk --locked
+```
+
+The curl, Homebrew, winget and pre-built binary routes below install upstream RTK, without PascalsLetter's changes.
+:::
+
 ## Name collision warning
 
 Two unrelated projects share the name `rtk`. Make sure you install the right one:
@@ -56,7 +66,7 @@ winget install rtk-ai.rtk
 :::
 
 ```bash
-cargo install --git https://github.com/rtk-ai/rtk --branch master rtk
+cargo install --git https://github.com/yungSNAT/PascalsLetter rtk --locked
 ```
 
 ## Pre-built binaries (Windows, Linux, macOS)
@@ -76,7 +86,7 @@ The same `rtk` binary built without the BUSL-1.1 compression engine — the hook
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | RTK_EDITION=oss sh
 brew install rtk-ai/tap/rtk-oss
-cargo install --git https://github.com/rtk-ai/rtk --branch master rtk --no-default-features
+cargo install --git https://github.com/yungSNAT/PascalsLetter rtk --locked --no-default-features
 ```
 
 Release assets are named `rtk-oss-<target>`, with `rtk-oss` Debian and RPM packages alongside. The binary is still called `rtk`, so hooks and scripts are unchanged — but the two editions conflict and cannot be installed together.
