@@ -2080,6 +2080,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_quote_inside_a_double_quoted_expansion_asks() {
+        let allow = vec!["*".to_string()];
+        for cmd in [
+            "ls \"${x:-\"a\"}\"",
+            "ls \"${x#'a'}\"",
+            "ls \"$[ \"1\" ]\"",
+            "(( \"${x:-\"a\"}\" ))",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &[], &allow),
+                PermissionVerdict::Ask,
+                "{cmd:?}"
+            );
+        }
+    }
+
     /// Every row reads as allowed under a reading that trusts what the lexer
     /// tracks, and the shell runs the last line of each.
     #[test]

@@ -576,6 +576,15 @@ mod tests {
     }
 
     #[test]
+    fn a_quote_inside_a_double_quoted_expansion_asks() {
+        let rules = [rule("*", Action::Allow)];
+        assert_eq!(
+            check_command_with_opencode_rules("ls \"${x:-\"a\"}\"", &rules),
+            PermissionVerdict::Ask
+        );
+    }
+
+    #[test]
     fn rules_see_past_a_line_continuation() {
         let rules = [rule("*", Action::Allow), rule("rm *", Action::Deny)];
         for cmd in ["\\\nrm -rf y", "r\\\nm -rf y", "ls # a \\\nr\\\nm -rf y"] {
