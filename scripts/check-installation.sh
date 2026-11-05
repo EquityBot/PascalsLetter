@@ -143,8 +143,6 @@ if [ ${#MISSING_FEATURES[@]} -gt 0 ]; then
     echo "To get all features, install the fork:"
     echo "  cargo uninstall rtk"
     echo "  cargo install --git https://github.com/yungSNAT/PascalsLetter rtk --locked"
-    echo "  cd rtk && git checkout feat/all-features"
-    echo "  cargo install --path . --force"
 else
     echo -e "${GREEN}✅ Full-featured RTK installation detected${NC}"
 fi

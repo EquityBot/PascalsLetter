@@ -20,7 +20,7 @@ rtk: 'gain' is not a rtk command. See 'rtk --help'.
 **Fix:**
 ```bash
 cargo uninstall rtk
-curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/master/install.sh | sh
+cargo install --git https://github.com/yungSNAT/PascalsLetter rtk --locked
 rtk gain    # should now show token savings stats
 ```
 
