@@ -985,7 +985,10 @@ fn process_codex_payload(v: &Value) -> PayloadAction {
         };
     }
 
-    if crate::discover::lexer::contains_unattestable_construct(cmd) {
+    if crate::discover::lexer::unattestable_either_reading(
+        cmd,
+        crate::discover::lexer::ShellDialect::Posix,
+    ) {
         return PayloadAction::Skip {
             decision: HookOutcome::Defer,
             reason: "skip:defer",
@@ -2424,6 +2427,7 @@ mod tests {
                 "skip:unsupported_permission_mode",
             ),
             ("git status $(whoami)", Some("default"), "skip:defer"),
+            ("git status # $(whoami)", Some("default"), "skip:defer"),
             ("htop", Some("default"), "skip:no_rewrite"),
         ] {
             let input: Value =

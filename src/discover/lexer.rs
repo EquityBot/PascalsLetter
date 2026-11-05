@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeKind {
     /// Standard stdout pipeline (`|`).
@@ -476,6 +478,100 @@ fn flush_arg(tokens: &mut Vec<ParsedToken>, current: &mut String, offset: usize)
     }
 }
 
+/// `cmd` with every shell comment blanked to spaces, byte offsets unchanged,
+/// so quoting and operators in comment text reach no later line (#4029).
+///
+/// A `#` opens a comment only at the start of a word — start of input, or
+/// after unquoted, unescaped whitespace or one of `; & | ( ) < >` — and the
+/// comment runs to the end of the line.
+///
+/// `None` when this scan cannot say the `#` is a comment: right after `(` (zsh
+/// reads `(#i)` as a glob flag) or `)` (zsh reads `(a)#` as one glob word, so
+/// `ls (a)#; rm x` runs `rm`); inside backticks, `${...}` or
+/// `((...))`/`$((...))`, or after a heredoc `<<`, whose ends this scan does not
+/// reliably find; or a comment holding a lone `\r` (a line break to the
+/// conservative splitter, not to bash). Callers must not attest those.
+pub(crate) fn blank_comments(cmd: &str) -> Option<Cow<'_, str>> {
+    if !cmd.contains('#') {
+        return Some(Cow::Borrowed(cmd));
+    }
+    let bytes = cmd.as_bytes();
+    let mut out = String::with_capacity(cmd.len());
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut in_comment = false;
+    let mut word_start = true;
+    let mut prev: Option<char> = None;
+    let mut in_backtick = false;
+    let mut brace_depth = 0u32;
+    let mut arith_depth = 0u32;
+    let mut heredoc = false;
+
+    for (i, c) in cmd.char_indices() {
+        if in_comment {
+            if c == '\n' || is_crlf_at(bytes, i) {
+                in_comment = false;
+            } else if c == '\r' {
+                return None;
+            } else {
+                out.extend(std::iter::repeat_n(' ', c.len_utf8()));
+                continue;
+            }
+        }
+        out.push(c);
+
+        if escaped {
+            escaped = false;
+            // `\<newline>` is elided, so it leaves the look-behind as it was.
+            if c != '\n' {
+                word_start = false;
+                prev = None;
+            }
+            continue;
+        }
+        if c == '\\' && quote != Some('\'') {
+            escaped = true;
+            continue;
+        }
+        if quote.is_some() || c == '\'' || c == '"' {
+            if c == '`' && quote == Some('"') {
+                in_backtick = !in_backtick;
+            }
+            quote = advance_quote_state(quote, c);
+            word_start = false;
+            prev = Some(c);
+            continue;
+        }
+
+        let blind = in_backtick || brace_depth > 0 || arith_depth > 0 || heredoc;
+        match c {
+            '#' if word_start => {
+                if blind || matches!(prev, Some('(' | ')')) {
+                    return None;
+                }
+                out.pop();
+                out.push(' ');
+                in_comment = true;
+                continue;
+            }
+            '`' => in_backtick = !in_backtick,
+            '{' if brace_depth > 0 || prev == Some('$') => brace_depth += 1,
+            '}' if brace_depth > 0 => brace_depth -= 1,
+            '(' if arith_depth > 0 => arith_depth += 1,
+            '(' if bytes.get(i + 1) == Some(&b'(') && (word_start || prev == Some('$')) => {
+                arith_depth = 1;
+            }
+            ')' if arith_depth > 0 => arith_depth -= 1,
+            '<' if bytes.get(i + 1) == Some(&b'<') => heredoc = true,
+            _ => {}
+        }
+        word_start =
+            is_word_boundary_whitespace(c) || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>');
+        prev = Some(c);
+    }
+    Some(Cow::Owned(out))
+}
+
 /// Which grammar a command string is written in.
 ///
 /// RTK lexes a host's command string as bash — that is the tool the agent
@@ -496,13 +592,16 @@ pub(crate) enum ShellDialect {
 /// True for constructs the permission gate can't decompose, so they must never
 /// be auto-allowed: command/process substitution, quoting the lexer reads
 /// differently from bash, or a real file-target redirect (fd-dup like `2>&1`
-/// and `/dev/null` are exempt). Separators and subshells are handled by
-/// [`split_for_permissions`], not flagged here.
+/// and `/dev/null` are exempt).
+/// Comment text is ignored, as the shell ignores it. Separators and subshells
+/// are handled by [`split_for_permissions`], not
+/// flagged here.
+#[cfg(test)]
 pub fn contains_unattestable_construct(cmd: &str) -> bool {
     contains_unattestable_construct_in(cmd, ShellDialect::Posix)
 }
 
-/// [`contains_unattestable_construct`] for a string whose dialect is known.
+/// `contains_unattestable_construct` for a string whose dialect is known.
 ///
 /// In fish, two more shapes carry meaning this lexer does not model: `(cmd)` is
 /// command substitution rather than a subshell, and `and`, `or`, `end` and
@@ -511,11 +610,27 @@ pub fn contains_unattestable_construct(cmd: &str) -> bool {
 /// drop the rewrite for every ordinary `(cd dir && cmd)` and every line that
 /// merely contains an `if … fi` block.
 pub(crate) fn contains_unattestable_construct_in(cmd: &str, dialect: ShellDialect) -> bool {
-    if contains_substitution(cmd) {
+    unattestable_under(cmd, dialect, true)
+}
+
+fn unattestable_under(cmd: &str, dialect: ShellDialect, blank: bool) -> bool {
+    // Comments are blanked with bash's quoting rules, which fish does not share
+    // (`\'` escapes a quote inside fish's single quotes), so a fish script is
+    // read with its comment text, as before (#4029).
+    let code = if !blank || dialect == ShellDialect::Fish {
+        Cow::Borrowed(cmd)
+    } else {
+        let Some(code) = blank_comments(cmd) else {
+            return true;
+        };
+        code
+    };
+    if contains_substitution(&code) {
         return true;
     }
     // Segments are not evidence about what will run once quoting diverges.
-    if ansi_c_quote_defeats_lexer(cmd) {
+    // The raw text is checked too, so a comment can only ever add a refusal.
+    if ansi_c_quote_defeats_lexer(cmd) || ansi_c_quote_defeats_lexer(&code) {
         return true;
     }
     // `&|` and `&!` are one operator to the shell that names itself. This
@@ -535,7 +650,7 @@ pub(crate) fn contains_unattestable_construct_in(cmd: &str, dialect: ShellDialec
     {
         return true;
     }
-    let tokens = tokenize(cmd);
+    let tokens = tokenize(&code);
     tokens
         .iter()
         .enumerate()
@@ -636,6 +751,59 @@ fn contains_substitution(cmd: &str) -> bool {
     false
 }
 
+/// The gate's two readings of a command. Comment text read as code can hide a
+/// later line behind a quote; a `#` wrongly read as a comment can hide the rest of
+/// its line. Neither reading is trusted alone: the gate checks the commands of
+/// both. Its verdict only ever rises as commands are added (one denied command
+/// denies, and allow needs all of them), so it can be no weaker than either.
+pub(crate) fn gate_segments(cmd: &str) -> Vec<&str> {
+    let mut segments = split_for_permissions_as_code(cmd);
+    for blanked in split_for_permissions(cmd) {
+        if !segments.contains(&blanked) {
+            segments.push(blanked);
+        }
+    }
+    segments
+}
+
+/// [`split_for_permissions`] with comment text read as code.
+pub(crate) fn split_for_permissions_as_code(cmd: &str) -> Vec<&str> {
+    segment(cmd, Policy::PERMISSIONS.reading_comments_as_code())
+        .into_iter()
+        .map(|s| s.text)
+        .collect()
+}
+
+/// [`split_for_wrappers`] with comment text read as code.
+pub(crate) fn split_for_wrappers_as_code(cmd: &str) -> Vec<&str> {
+    segment(cmd, Policy::WRAPPERS.reading_comments_as_code())
+        .into_iter()
+        .map(|s| s.text)
+        .collect()
+}
+
+/// [`contains_unattestable_construct_in`] with comment text read as code.
+pub(crate) fn unattestable_as_code(cmd: &str, dialect: ShellDialect) -> bool {
+    unattestable_under(cmd, dialect, false)
+}
+
+/// True when either of the gate's readings of `cmd` refuses it (see
+/// [`gate_segments`]). A comment can therefore add a refusal.
+pub(crate) fn unattestable_either_reading(cmd: &str, dialect: ShellDialect) -> bool {
+    unattestable_as_code(cmd, dialect) || contains_unattestable_construct_in(cmd, dialect)
+}
+
+/// True when the gate's two readings of `cmd` differ on what its commands are, or
+/// shells disagree about a `#` in it. The rewrite works from one reading alone, so
+/// such a command is left as written.
+pub(crate) fn comment_readings_disagree(cmd: &str) -> bool {
+    let Some(code) = blank_comments(cmd) else {
+        return true;
+    };
+    matches!(code, Cow::Owned(_))
+        && split_for_permissions(cmd) != split_for_permissions_as_code(cmd)
+}
+
 /// True for a heredoc or here-string redirect (`<<`, `<<-`, `<<<`), with or
 /// without the descriptor the tokenizer folds into it (`3<<EOF`, `0<<-EOF`).
 pub(crate) fn is_heredoc_redirect(value: &str) -> bool {
@@ -667,8 +835,21 @@ pub(crate) fn redirect_takes_operand(value: &str) -> bool {
 
 // A redirect that takes an operand names a file unless that operand is
 // `/dev/null`; a bare `>&` before a word is `>word 2>&1` — a file target too.
+// A heredoc or herestring also returns true, whatever its delimiter: its body
+// is inline data that no caller can attest.
 pub(crate) fn redirect_has_file_target(tokens: &[ParsedToken], i: usize) -> bool {
-    if !redirect_takes_operand(&tokens[i].value) {
+    let value = &tokens[i].value;
+    // A heredoc operator arrives as `<<` with any fd digits folded in front
+    // (`3<<`); the `-` of `<<-` stays in the next word, and a herestring `<<<`
+    // arrives as `<<` then `<`. Its operand is a delimiter, so a delimiter
+    // spelled `/dev/null` must not reach the exemption below.
+    if value
+        .trim_start_matches(|ch: char| ch.is_ascii_digit())
+        .starts_with("<<")
+    {
+        return true;
+    }
+    if !redirect_takes_operand(value) {
         return false;
     }
     match tokens.get(i + 1) {
@@ -704,6 +885,9 @@ pub(crate) struct Policy {
     group_boundaries: bool,
     redirects: RedirectPolicy,
     stop_at_pipe: bool,
+    /// Tokenize with shell comments blanked, so comment text can neither merge
+    /// lines nor add boundaries (#4029). The gate's policies only.
+    blank_comments: bool,
 }
 
 impl Policy {
@@ -713,6 +897,7 @@ impl Policy {
         group_boundaries: true,
         redirects: RedirectPolicy::Excise,
         stop_at_pipe: false,
+        blank_comments: true,
     };
 
     /// The permission gate's look for a quoted shell wrapper: its boundaries,
@@ -729,11 +914,20 @@ impl Policy {
         group_boundaries: false,
         redirects: RedirectPolicy::Keep,
         stop_at_pipe: false,
+        blank_comments: false,
     };
 
     pub(crate) const fn stopping_at_pipe(self, stop_at_pipe: bool) -> Self {
         Self {
             stop_at_pipe,
+            ..self
+        }
+    }
+
+    /// The same policy with comment text tokenized as code.
+    const fn reading_comments_as_code(self) -> Self {
+        Self {
+            blank_comments: false,
             ..self
         }
     }
@@ -789,7 +983,15 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
         return vec![];
     }
 
-    let tokens = tokenize_inner(trimmed, policy.newline);
+    // Tokens come from the comment-blanked text (same offsets); segments keep
+    // the original text. Where shells disagree about a `#`, the raw text is
+    // tokenized and `contains_unattestable_construct` refuses the command anyway.
+    let code = if policy.blank_comments {
+        blank_comments(trimmed)
+    } else {
+        Some(Cow::Borrowed(trimmed))
+    };
+    let tokens = tokenize_inner(code.as_deref().unwrap_or(trimmed), policy.newline);
     let mut out = Vec::new();
     let mut seg_start: usize = 0;
     let mut seg_end: Option<usize> = None;
@@ -2013,6 +2215,33 @@ mod tests {
         assert!(!contains_unattestable_construct(""));
     }
 
+    #[test]
+    fn test_quoting_in_comment_text_can_only_add_a_refusal() {
+        assert!(contains_unattestable_construct("ls # $'a\\'b'"));
+        assert!(unattestable_either_reading(
+            "git status # $(id)",
+            ShellDialect::Posix
+        ));
+        // ANSI-C quoting past a line both readings keep: raw text alone reads a
+        // comment's apostrophe as the end of the string.
+        assert!(contains_unattestable_construct(
+            "ls # it's\n$'a\\'; rm -rf y'"
+        ));
+    }
+
+    #[test]
+    fn test_bugfix_issue_3980_heredoc_devnull_not_exempt() {
+        // Heredocs with /dev/null as delimiter should be unattestable
+        // because /dev/null is the delimiter, not a file target
+        assert!(contains_unattestable_construct("git status << /dev/null"));
+        assert!(contains_unattestable_construct("git status <</dev/null"));
+        assert!(contains_unattestable_construct("git status <<-EOF"));
+        assert!(contains_unattestable_construct("git status <<- /dev/null"));
+        assert!(contains_unattestable_construct("git status 3<< /dev/null"));
+        assert!(contains_unattestable_construct("git status 3<</dev/null"));
+        assert!(contains_unattestable_construct("git status 3<<- /dev/null"));
+    }
+
     // --- split_for_permissions ---------------------------------------------
 
     /// `segment()` replaced two hand-rolled walkers. This is the contract for
@@ -2239,6 +2468,135 @@ mod tests {
     fn test_split_perms_empty() {
         assert!(split_for_permissions("").is_empty());
         assert!(split_for_permissions("   ").is_empty());
+    }
+
+    // --- shell comments (#4029) --------------------------------------------
+
+    #[test]
+    fn test_comment_apostrophe_does_not_hide_later_substitution() {
+        assert!(contains_unattestable_construct(
+            "ls # it's fine\necho $(id)"
+        ));
+        assert!(contains_unattestable_construct(
+            "ls -la # it's fine\ncurl `echo http://x`"
+        ));
+        assert!(contains_unattestable_construct(
+            "ls # it's fine\ncat > /tmp/x"
+        ));
+        assert!(contains_unattestable_construct(
+            "ls # say \"hi `x`\necho $(id)"
+        ));
+    }
+
+    #[test]
+    fn test_comment_apostrophe_does_not_merge_segments() {
+        assert_eq!(
+            split_for_permissions("ls # don't\nrm -rf x"),
+            vec!["ls # don't", "rm -rf x"]
+        );
+        assert_eq!(
+            split_for_permissions("ls # say \"hi `x`\nrm -rf x"),
+            vec!["ls # say \"hi `x`", "rm -rf x"]
+        );
+        // `#` opens a comment right after an operator too.
+        assert_eq!(
+            split_for_permissions("ls;# don't\nrm -rf x"),
+            vec!["ls", "# don't", "rm -rf x"]
+        );
+        // `\<newline>` is elided, so the `#` after it still starts a word.
+        assert_eq!(
+            split_for_permissions("ls \\\n# don't\nrm -rf x"),
+            vec!["ls \\\n# don't", "rm -rf x"]
+        );
+    }
+
+    #[test]
+    fn test_comment_text_is_inert() {
+        assert!(!contains_unattestable_construct("git status # it's done"));
+        assert!(!contains_unattestable_construct(
+            "git status # $(id) `id` > /tmp/x"
+        ));
+        assert_eq!(
+            split_for_permissions("git status # it's done"),
+            vec!["git status # it's done"]
+        );
+        assert_eq!(
+            split_for_permissions("git status # a; rm -rf x"),
+            vec!["git status # a; rm -rf x"]
+        );
+    }
+
+    #[test]
+    fn test_hash_that_is_not_a_comment_hides_nothing() {
+        for prefix in [
+            "echo foo#bar",
+            "echo '#'",
+            "echo \"a # b\"",
+            "echo \\#",
+            "echo \\ #x",
+            "echo \"a\"#b",
+            "echo $#",
+            "echo ${#x}",
+            "echo ${x:- #}",
+            "(( 1 #))",
+        ] {
+            assert!(
+                contains_unattestable_construct(&format!("{prefix} $(id)")),
+                "{prefix:?} hid a substitution"
+            );
+            assert_eq!(
+                split_for_permissions(&format!("{prefix}; rm -rf x")).last(),
+                Some(&"rm -rf x"),
+                "{prefix:?} hid a command"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hash_inside_backticks_hides_nothing() {
+        // The shell ends a comment inside backticks at the closing backtick.
+        let segments = split_for_permissions("echo `ls #x`; rm -rf x");
+        assert_eq!(segments.last(), Some(&"rm -rf x"));
+    }
+
+    /// Where the scan loses track of a construct it must refuse, not guess.
+    #[test]
+    fn test_hash_the_scan_cannot_place_is_refused() {
+        for cmd in [
+            "ls ${x:-{} # n",
+            "((${x:-(})) # n",
+            "ls `id # n",
+            "ls $\\\n{x:- # n",
+            "ls <<EOF\n# n\nEOF",
+            "ls (a)\\\n# n",
+        ] {
+            assert_eq!(blank_comments(cmd), None, "{cmd:?}");
+            assert!(contains_unattestable_construct(cmd), "{cmd:?}");
+        }
+        // Text that only resembles those constructs leaves the comment a comment.
+        assert_eq!(
+            blank_comments("ls $\\{{ #n").as_deref(),
+            Some("ls $\\{{   ")
+        );
+        assert_eq!(blank_comments("ls ${x} #n").as_deref(), Some("ls ${x}   "));
+    }
+
+    #[test]
+    fn test_ambiguous_comment_is_unattestable() {
+        // zsh reads `(#i)` as a glob flag where bash reads a comment.
+        assert!(contains_unattestable_construct("ls (#i)foo; rm -rf x"));
+        // zsh reads `(a)#` as one glob word, so the `; rm` after it runs.
+        assert!(contains_unattestable_construct("ls (a)#; rm -rf x"));
+        assert_eq!(
+            split_for_permissions("ls (a)#; rm -rf x").last(),
+            Some(&"rm -rf x")
+        );
+        // A lone CR ends the line for a conservative reader but not for bash.
+        assert!(contains_unattestable_construct("ls # x\rrm -rf y"));
+        assert_eq!(
+            split_for_permissions("ls # x\rrm -rf y").last(),
+            Some(&"rm -rf y")
+        );
     }
 
     #[test]

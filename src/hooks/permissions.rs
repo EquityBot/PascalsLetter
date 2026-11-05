@@ -7,7 +7,8 @@ use crate::core::user_dirs;
 use crate::core::user_env;
 use crate::core::utils::strip_leading_bom;
 use crate::discover::lexer::{
-    is_word_boundary_whitespace, split_for_permissions, split_for_wrappers,
+    ShellDialect, gate_segments, is_word_boundary_whitespace, split_for_wrappers,
+    split_for_wrappers_as_code, unattestable_either_reading,
 };
 use crate::discover::registry;
 #[cfg(test)]
@@ -232,7 +233,33 @@ pub(crate) fn check_command_with_rules_and_prefixes(
     allow_rules: &[String],
     transparent_prefixes: &[String],
 ) -> PermissionVerdict {
-    let segments = split_compound_command(cmd);
+    // Both readings of the command, comment text as code and blanked (see
+    // `gate_segments`). `gate_verdict` only rises as commands are added.
+    let joined = registry::collapse_line_continuations_ignoring_quotes(cmd);
+    let joined_as_code = registry::collapse_ignoring_quotes_and_comments(cmd);
+    let mut wrapper_segments = split_for_wrappers(&joined);
+    wrapper_segments.extend(split_for_wrappers_as_code(&joined_as_code));
+    gate_verdict(
+        &split_compound_command(cmd),
+        &wrapper_segments,
+        unattestable_either_reading(cmd, ShellDialect::Posix),
+        deny_rules,
+        ask_rules,
+        allow_rules,
+        transparent_prefixes,
+    )
+}
+
+/// The verdict for the commands a reading of a command found.
+fn gate_verdict(
+    segments: &[&str],
+    wrapper_segments: &[&str],
+    unattestable: bool,
+    deny_rules: &[String],
+    ask_rules: &[String],
+    allow_rules: &[String],
+    transparent_prefixes: &[String],
+) -> PermissionVerdict {
     // Each segment read every way a deny or ask rule may name it, once: as
     // written, then without the grammar a split leaves behind (`{`, `!`,
     // `(`), then past each assignment or wrapper in turn — `HUSKY=0 git
@@ -270,16 +297,14 @@ pub(crate) fn check_command_with_rules_and_prefixes(
     }
 
     let transparent_prefixes = registry::normalize_transparent_prefixes(transparent_prefixes);
-    let joined = registry::collapse_line_continuations_ignoring_quotes(cmd);
-    let wrapper_segments = split_for_wrappers(&joined);
     if let Some(verdict) =
-        check_shell_wrapper_permissions(&wrapper_segments, deny_rules, &transparent_prefixes)
+        check_shell_wrapper_permissions(wrapper_segments, deny_rules, &transparent_prefixes)
     {
         return verdict;
     }
 
     // Can't decompose substitution / file-target redirects — never auto-allow.
-    if crate::discover::lexer::contains_unattestable_construct(cmd) {
+    if unattestable {
         return PermissionVerdict::Ask;
     }
 
@@ -355,7 +380,7 @@ fn check_shell_wrapper_permissions(
             // Both spellings, exactly as the outer loop above: a segment can open
             // with grammar that is not part of the command (`! rm …`, `{ rm …`),
             // and a rule naming the command has to reach it there too.
-            let inner_denied = split_for_permissions(script).iter().any(|inner_segment| {
+            let inner_denied = gate_segments(script).iter().any(|inner_segment| {
                 let inner_segment = inner_segment.trim();
                 let readings = registry::shell_wrapper_positions(
                     strip_grammar_residue(inner_segment),
@@ -753,7 +778,7 @@ fn strip_grammar_residue(segment: &str) -> &str {
 /// form: against CRLF the backslash escapes the `\r` and the `\n` still
 /// terminates the command, in bash and in the lexer alike, so the words either
 /// side are already separate segments.
-fn normalize_command_text(text: &str) -> String {
+pub(crate) fn normalize_command_text(text: &str) -> String {
     text.replace("\\\n", "")
         .split(is_word_boundary_whitespace)
         .filter(|part| !part.is_empty())
@@ -855,7 +880,7 @@ fn glob_matches(cmd: &str, pattern: &str) -> bool {
 }
 
 fn split_compound_command(cmd: &str) -> Vec<&str> {
-    split_for_permissions(cmd)
+    gate_segments(cmd)
 }
 
 #[cfg(test)]
@@ -1930,6 +1955,28 @@ mod tests {
     }
 
     #[test]
+    fn test_comment_quoting_stays_in_the_comment() {
+        // #4029: every later line stays in the gate's view.
+        let allow = vec!["ls:*".to_string(), "cat:*".to_string()];
+        for cmd in [
+            "ls -la # it's fine\ncurl $(echo http://x)",
+            "ls -la # it's fine\ncurl `echo http://x`",
+            "ls -la # it's fine\nrm -rf x",
+        ] {
+            assert_ne!(
+                check_command_with_rules(cmd, &[], &[], &allow),
+                PermissionVerdict::Allow,
+                "{cmd:?} must not auto-allow"
+            );
+        }
+        let deny = vec!["rm:*".to_string()];
+        assert_eq!(
+            check_command_with_rules("ls -la # don't\nrm -rf x", &deny, &[], &allow),
+            PermissionVerdict::Deny
+        );
+    }
+
+    #[test]
     fn test_single_quoted_substitution_is_literal() {
         let allow = vec!["echo *".to_string()];
         assert_eq!(
@@ -1946,6 +1993,196 @@ mod tests {
             check_command_with_rules("git log > ~/.bashrc", &[], &[], &allow),
             PermissionVerdict::Ask
         );
+    }
+
+    #[test]
+    fn test_backslash_ending_a_comment_hides_no_later_line() {
+        // #4029: the newline ends the comment, so the next line is a command.
+        let allow = vec!["ls:*".to_string(), "bash:*".to_string()];
+        let deny = vec!["rm:*".to_string()];
+        for (cmd, verdict) in [
+            ("ls # n \\\nrm -rf x", PermissionVerdict::Deny),
+            ("ls # n \\\nbash -c 'rm -rf x'", PermissionVerdict::Defer),
+            ("ls # it's \\\nbash -c 'rm -rf x'", PermissionVerdict::Defer),
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &allow),
+                verdict,
+                "{cmd:?}"
+            );
+        }
+        assert_ne!(
+            check_command_with_rules("ls # n \\\ncurl x", &[], &[], &allow),
+            PermissionVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn test_unreadable_comment_asks() {
+        let allow = vec!["ls:*".to_string()];
+        for cmd in [
+            "ls (#i)ls # it's\nrm -rf x",
+            "ls (ls)# # it's\nrm -rf x",
+            "ls # x\ry",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &[], &allow),
+                PermissionVerdict::Ask,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_the_gate_takes_the_stricter_of_2_readings() {
+        let deny = vec!["rm:*".to_string()];
+        let allow = vec!["ls".to_string(), "echo".to_string(), "git".to_string()];
+        let allow_all = vec!["*".to_string()];
+        for cmd in [
+            "echo $\\\n{x:- #}; rm -rf y",
+            "git status $\\\n{x:- #}; rm -rf y",
+            "ls (q #b); rm -rf y",
+            "echo $[ #x ]; rm -rf y",
+            "[[ x =~ (a #b) ]]; rm -rf y",
+            "for((a=1 #;0;0))do :;done;rm -rf y",
+            "(\\\n( 1 #)); rm -rf y",
+            "\u{b}#; rm -rf y",
+            "\r#; rm -rf y",
+            "\u{a0}#; rm -rf y",
+            "ls (a)\\\n#; rm -rf y",
+        ] {
+            for allow in [&allow, &allow_all] {
+                assert_eq!(
+                    check_command_with_rules(cmd, &deny, &[], allow),
+                    PermissionVerdict::Deny,
+                    "{cmd:?}"
+                );
+            }
+        }
+        for cmd in [
+            "ls # a; bash -c 'rm -rf y'",
+            "ls # a; bash -c \\\n'rm -rf y'",
+            "bash -c 'ls # a; rm -rf y'",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &allow_all),
+                PermissionVerdict::Defer,
+                "{cmd:?}"
+            );
+        }
+        assert_eq!(
+            check_command_with_rules("git status # `id`", &[], &[], &allow_all),
+            PermissionVerdict::Ask
+        );
+        assert_eq!(
+            check_command_with_rules("ls (*|#b) > /tmp/x", &deny, &[], &allow),
+            PermissionVerdict::Ask
+        );
+    }
+
+    /// Every row reads as allowed under a reading that trusts what the lexer
+    /// tracks, and the shell runs the last line of each.
+    #[test]
+    fn test_what_the_lexer_cannot_read_is_never_allowed() {
+        let allow = vec!["*".to_string()];
+        for cmd in [
+            "ls ${x:-{} # it's\nrm -rf y",
+            "((${x:-(})) # it's\nrm -rf y",
+            "ls << /dev/null\nit's\n/dev/null\nrm -rf y",
+            "ls <<- /dev/null\nit's\n/dev/null\nrm -rf y",
+            "ls 3<< /dev/null\nit's\n/dev/null\nrm -rf y",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &[], &allow),
+                PermissionVerdict::Ask,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    /// Generated commands: the gate is never weaker than `gate_verdict` on the
+    /// reading that takes comment text as code.
+    #[test]
+    fn test_the_gate_is_never_weaker_than_reading_comments_as_code() {
+        use crate::discover::lexer::{split_for_permissions_as_code, unattestable_as_code};
+
+        fn strictness(verdict: PermissionVerdict) -> u8 {
+            match verdict {
+                PermissionVerdict::Allow => 0,
+                PermissionVerdict::Default => 1,
+                PermissionVerdict::Ask => 2,
+                PermissionVerdict::Defer => 3,
+                PermissionVerdict::Deny => 4,
+            }
+        }
+
+        let leads = ["", "\u{b}", "\r", "\u{a0}"];
+        let heads = ["", "ls", "echo", "git status"];
+        let shapes = [
+            "# n",
+            "# it's",
+            "# n \\\n",
+            "#",
+            "a#b",
+            "'#'",
+            "\\#",
+            "$\\\n{x:- #}",
+            "${#x}",
+            "(q #b)",
+            "$[ #x ]",
+            "(a)#",
+            "(a)\\\n#",
+            "(\\\n#i)",
+            "(#i)",
+            "(*|#b)",
+            "[[ x =~ (a #b) ]]",
+            "for((a=1 #;0;0))do :;done",
+            "(\\\n( 1 #))",
+            "$(( 1 #))",
+            "`id #x`",
+            "$'a\\'b' #",
+            "<< /dev/null #",
+            "<<< x #",
+        ];
+        let seps = ["; ", ";", " && ", "\n", " | ", " & ", "\r", "\r\n", ""];
+        let tails = ["rm -rf y", "bash -c 'rm -rf y'", "> /tmp/x", "echo $(id)"];
+        let rm = vec!["rm:*".to_string()];
+        let all = vec!["*".to_string()];
+        let some = vec!["ls".to_string(), "echo".to_string(), "git".to_string()];
+        let none: Vec<String> = Vec::new();
+        let rules = [(&rm, &none, &some), (&rm, &none, &all), (&none, &rm, &all)];
+
+        let mut checked = 0;
+        for lead in leads {
+            for head in heads {
+                for shape in shapes {
+                    for sep in seps {
+                        for tail in tails {
+                            let cmd = format!("{lead}{head} {shape}{sep}{tail}");
+                            let joined = registry::collapse_ignoring_quotes_and_comments(&cmd);
+                            for (deny, ask, allow) in rules {
+                                let as_code = gate_verdict(
+                                    &split_for_permissions_as_code(&cmd),
+                                    &split_for_wrappers_as_code(&joined),
+                                    unattestable_as_code(&cmd, ShellDialect::Posix),
+                                    deny,
+                                    ask,
+                                    allow,
+                                    &[],
+                                );
+                                let verdict = check_command_with_rules(&cmd, deny, ask, allow);
+                                assert!(
+                                    strictness(verdict) >= strictness(as_code),
+                                    "{cmd:?}: {verdict:?} is weaker than {as_code:?}"
+                                );
+                                checked += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 41_472, "the grammar stopped generating commands");
     }
 
     #[test]
