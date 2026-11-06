@@ -53,7 +53,7 @@ When a hook sends `cargo fmt --all && cargo test 2>&1 | tail -20`:
 | `split_for_permissions(cmd)` | Segments a compound command for the **permission gate** — deliberately the most conservative of three segmenters (see its doc comment for the full comparison table) | `gate_segments` in this module |
 | `gate_segments(cmd)` | The gate's two readings of a command together: comment text blanked (`split_for_permissions`) and read as code. The gate checks the commands of both | `hooks/permissions.rs`, `hooks/permissions_opencode.rs` |
 | `split_for_classify(cmd)` | Segments for classification only — not safe for permission/security decisions | — (`pub(crate)`; its caller `registry.rs::split_command_chain` is this module) |
-| `contains_unattestable_construct(cmd)` | True for command/process substitution, quoting the lexer reads differently from bash (`$'\''`), a heredoc, or a file-target redirect — constructs the permission gate can't decompose and must never auto-allow. Reads comments as blanked; test builds only | — |
+| `contains_unattestable_construct(cmd)` | True for command/process substitution, quoting the lexer reads differently from bash (`$'\''`, a quote inside a double-quoted `${...}`), a heredoc, or a file-target redirect — constructs the permission gate can't decompose and must never auto-allow. Reads comments as blanked; test builds only | — |
 | `contains_unattestable_construct_in(cmd, dialect)` | The same check for a string whose shell is known — adds fish's `(cmd)` substitution and command-position control keywords | — |
 | `unattestable_either_reading(cmd, dialect)` | True when either of the gate's readings refuses the command | `hooks/permissions.rs`, `hooks/permissions_opencode.rs`, `hooks/decision.rs`, `hooks/hook_cmd.rs` |
 

@@ -134,6 +134,32 @@ pub(crate) fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
     false
 }
 
+/// Inside double quotes, `${...}` and `$[...]` hold a quoting context of their
+/// own: the shell opens a nested string at a `"` where the lexer closes the
+/// outer one, and what a `'` does depends on the operator. The lexer models
+/// neither, so its quote state is no evidence once one appears. Either comment
+/// reading of `cmd` is enough.
+pub(crate) fn expansion_quote_defeats_lexer(cmd: &str) -> bool {
+    fn scan(text: &str) -> bool {
+        let mut depth = 0u32;
+        let mut prev_yielded = None;
+        for (_, b, _, in_double) in QuoteScan::new(text) {
+            if in_double {
+                match b {
+                    b'"' | b'\'' if depth > 0 => return true,
+                    b'[' if prev_yielded == Some(b'$') => return true,
+                    b'{' if prev_yielded == Some(b'$') => depth += 1,
+                    b'}' if depth > 0 => depth -= 1,
+                    _ => {}
+                }
+            }
+            prev_yielded = Some(b);
+        }
+        false
+    }
+    scan(cmd) || blank_comments(cmd).is_some_and(|code| scan(&code))
+}
+
 /// Bash's default `$IFS` is exactly space/tab/newline — not Rust's
 /// `char::is_whitespace()`, which wrongly includes non-IFS Unicode
 /// whitespace like NBSP. Shared with `permissions.rs::command_matches_pattern`.
@@ -630,7 +656,10 @@ fn unattestable_under(cmd: &str, dialect: ShellDialect, blank: bool) -> bool {
     }
     // Segments are not evidence about what will run once quoting diverges.
     // The raw text is checked too, so a comment can only ever add a refusal.
-    if ansi_c_quote_defeats_lexer(cmd) || ansi_c_quote_defeats_lexer(&code) {
+    if ansi_c_quote_defeats_lexer(cmd)
+        || ansi_c_quote_defeats_lexer(&code)
+        || expansion_quote_defeats_lexer(cmd)
+    {
         return true;
     }
     // `&|` and `&!` are one operator to the shell that names itself. This
@@ -2227,6 +2256,40 @@ mod tests {
         assert!(contains_unattestable_construct(
             "ls # it's\n$'a\\'; rm -rf y'"
         ));
+    }
+
+    #[test]
+    fn test_quote_inside_a_double_quoted_expansion_is_refused() {
+        for cmd in [
+            "ls \"${x:-\"a\"}\"",
+            "ls \"${x:+\"a\"}\"",
+            "ls \"${x:=\"a\"}\"",
+            "ls \"${x#\"a\"}\"",
+            "ls \"${x%\"a\"}\"",
+            "ls \"${x/\"a\"/b}\"",
+            "ls \"${x#'a'}\"",
+            "ls \"${x:-${y:-\"a\"}}\"",
+            "ls \"${x:-{\"a\"}}\"",
+            "ls \"$[ \"1\" ]\"",
+            "(( \"${x:-\"a\"}\" ))",
+            "ls # it's\nls \"${x:-\"a\"}\"",
+            "ls $[ #x ] \"${y:-\"a\"}\"",
+        ] {
+            assert!(contains_unattestable_construct(cmd), "{cmd:?}");
+        }
+        for cmd in [
+            "ls \"${x:-a}\"",
+            "ls \"${x}\" \"${y}\"",
+            "ls \"${x}'\"",
+            "ls \"\\${x:-\"a\"}\"",
+            "ls ${x:-\"a\"}",
+            "ls '\"${x:-\"'",
+            "ls \"a{b\"",
+            "ls \"a[b\"",
+            "ls \"${x:-{}\"",
+        ] {
+            assert!(!contains_unattestable_construct(cmd), "{cmd:?}");
+        }
     }
 
     #[test]

@@ -8,9 +8,9 @@ use std::sync::{LazyLock, OnceLock};
 
 use super::lexer::{
     ParsedToken, PipeKind, QuoteScan, TokenKind, advance_quote_state, ansi_c_quote_defeats_lexer,
-    blank_comments, coalesce_words, comment_readings_disagree, is_crlf_at, is_heredoc_redirect,
-    is_word_boundary_whitespace, redirect_has_file_target, shell_split, split_on_operators,
-    tokenize, tokenize_with_newlines, unattestable_either_reading,
+    blank_comments, coalesce_words, comment_readings_disagree, expansion_quote_defeats_lexer,
+    is_crlf_at, is_heredoc_redirect, is_word_boundary_whitespace, redirect_has_file_target,
+    shell_split, split_on_operators, tokenize, tokenize_with_newlines, unattestable_either_reading,
 };
 use super::rules::{IGNORED_EXACT, IGNORED_PREFIXES, RULES, RtkRule};
 use super::shell_wrapper::parse_shell_wrapper;
@@ -933,7 +933,7 @@ pub(crate) fn rewrite_command_precompiled(
         return None;
     }
 
-    if comment_readings_disagree(cmd) {
+    if comment_readings_disagree(cmd) || expansion_quote_defeats_lexer(cmd) {
         return None;
     }
 
@@ -8776,6 +8776,23 @@ mod tests {
         assert_eq!(
             rewrite_command_no_prefixes("git status # a note", &[]),
             Some("rtk git status # a note".into())
+        );
+    }
+
+    #[test]
+    fn test_quote_inside_a_double_quoted_expansion_is_not_rewritten() {
+        for cmd in [
+            "git status \"${x:-\"a\"}\"",
+            "git status \"${x#'a'}\"",
+            "git status \"$[ \"1\" ]\"",
+            "git status # it's\ngit log \"${x:-\"a\"}\"",
+            "bash -c 'git status \"${x:-\"a\"}\"'",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
+        assert_eq!(
+            rewrite_command_no_prefixes("git status \"${x:-a}\"", &[]),
+            Some("rtk git status \"${x:-a}\"".into())
         );
     }
 
