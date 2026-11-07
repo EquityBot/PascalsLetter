@@ -2106,6 +2106,24 @@ mod tests {
     }
 
     #[test]
+    fn test_backslash_before_crlf_hides_no_shell_wrapper() {
+        // Bash and zsh do not continue a line at `\<CR><NL>`, so the wrapper on
+        // the next line runs as a command of its own.
+        let deny = vec!["rm:*".to_string()];
+        let allow = vec!["*".to_string()];
+        for cmd in [
+            "ls \\\r\nbash -c 'rm -rf x'",
+            "ls # n \\\r\nbash -c 'rm -rf x'",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &allow),
+                PermissionVerdict::Defer,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_the_gate_takes_the_stricter_of_2_readings() {
         let deny = vec!["rm:*".to_string()];
         let allow = vec!["ls".to_string(), "echo".to_string(), "git".to_string()];
