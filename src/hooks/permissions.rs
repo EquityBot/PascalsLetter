@@ -7,7 +7,7 @@ use crate::core::user_dirs;
 use crate::core::user_env;
 use crate::core::utils::strip_leading_bom;
 use crate::discover::lexer::{
-    ShellDialect, gate_segments, is_word_boundary_whitespace, shell_split_decoding_dollar_quotes,
+    ShellDialect, gate_segments, is_word_boundary_whitespace, shell_split_as_passed,
     split_for_wrappers, split_for_wrappers_as_code, unattestable_either_reading,
 };
 use crate::discover::registry;
@@ -837,6 +837,10 @@ pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
 /// those words becomes U+0001, which is no word boundary, so the text of a quoted
 /// argument (`git commit -m 'never use --force'`) is not read as words. Deny and
 /// ask only: on allow these readings would approve more.
+///
+/// Gap: a rule with a literal after `*` does not see a word the shell makes by
+/// brace, parameter or command expansion (`--force{,}`, `$F`), and these cannot
+/// all be decided before the command runs.
 fn restricting_rule_matches(cmd: &str, pattern: &str) -> bool {
     let matches = |cmd: &str| {
         command_matches_pattern(cmd, pattern)
@@ -845,7 +849,7 @@ fn restricting_rule_matches(cmd: &str, pattern: &str) -> bool {
     matches(cmd)
         || (cmd.contains(['\'', '"', '\\'])
             && matches(
-                &shell_split_decoding_dollar_quotes(cmd)
+                &shell_split_as_passed(cmd)
                     .iter()
                     .map(|word| word.replace(is_word_boundary_whitespace, "\u{1}"))
                     .collect::<Vec<_>>()
@@ -1450,6 +1454,15 @@ mod tests {
             "git push origin $'--force'",
             "git push origin $'--\\x66orce'",
             "git push origin $\"--force\"",
+            // Bash ends a `$'…'` string at a NUL and decodes `\u`, `\U` and `\c`.
+            "git push origin $'--force\\0x'",
+            "git push origin $'--force\\x00x'",
+            "git push origin $'--force\\c@x'",
+            "git push origin $'\\u002d-force'",
+            "git push origin $'\\U0000002d-force'",
+            // The shell removes `\<LF>` outside single quotes.
+            "git push origin \"--for\\\nce\"",
+            "git push origin --for\\\nce",
         ] {
             assert_eq!(
                 check_command_with_rules(cmd, &rule, &[], &allow),

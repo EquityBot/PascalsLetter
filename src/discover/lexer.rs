@@ -1210,21 +1210,25 @@ pub fn strip_quotes(s: &str) -> String {
 /// Turns a coalesced word's raw text (quotes/escapes still literal, as
 /// `tokenize()` preserves them) into argv-ready text: quote chars that
 /// open/close a span are stripped, backslash escapes resolved. With
-/// `dollar_quotes`, an unquoted `$'…'` is decoded as bash decodes it and the
-/// `$` of an unquoted `$"…"` is dropped.
-fn resolve_word_text(raw: &str, dollar_quotes: bool) -> String {
+/// `as_passed`, the word is read as bash passes it: an unquoted `$'…'` is
+/// decoded, the `$` of an unquoted `$"…"` is dropped and so is a `\<LF>`
+/// outside single quotes.
+fn resolve_word_text(raw: &str, as_passed: bool) -> String {
     let mut result = String::new();
     let mut chars = raw.chars().peekable();
     let mut quote: Option<char> = None;
 
     while let Some(c) = chars.next() {
         match c {
-            '$' if dollar_quotes && quote.is_none() && chars.peek() == Some(&'\'') => {
+            '$' if as_passed && quote.is_none() && chars.peek() == Some(&'\'') => {
                 chars.next();
                 let span: String = chars.by_ref().take_while(|&c| c != '\'').collect();
-                result.push_str(&decode_backslashes(&span, true).unwrap_or(span));
+                result.push_str(&decode_ansi_c(&span));
             }
-            '$' if dollar_quotes && quote.is_none() && chars.peek() == Some(&'"') => {}
+            '$' if as_passed && quote.is_none() && chars.peek() == Some(&'"') => {}
+            '\\' if as_passed && quote != Some('\'') && chars.peek() == Some(&'\n') => {
+                chars.next();
+            }
             // Inside double quotes bash only lets `\` escape `$`, `` ` ``, `"`,
             // `\` or a newline; before anything else it is a literal character.
             // That is what keeps a quoted Windows path (`"C:\Program Files"`)
@@ -1271,9 +1275,79 @@ pub fn shell_split(input: &str) -> Vec<String> {
         .collect()
 }
 
-/// [`shell_split`] with `$'…'` decoded and the `$` of `$"…"` dropped, as bash
-/// passes those words, for the permission gate's deny and ask reading.
-pub(crate) fn shell_split_decoding_dollar_quotes(input: &str) -> Vec<String> {
+/// Decodes the body of a `$'…'` string as bash does: [`decode_backslashes`]
+/// with ANSI-C escapes, plus `\uHHHH`, `\UHHHHHHHH` and `\cX`, and the string
+/// ends at its first NUL. Bash keeps `\u` and `\c` with nothing to decode as
+/// written.
+fn decode_ansi_c(span: &str) -> String {
+    let mut out = String::new();
+    // Text whose escapes decode_backslashes handles, decoded on the next flush
+    // so a character decoded here is never decoded twice.
+    let mut plain = String::new();
+    let flush = |out: &mut String, plain: &mut String| {
+        out.push_str(&decode_backslashes(plain, true).unwrap_or_else(|| plain.clone()));
+        plain.clear();
+    };
+    let mut chars = span.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            plain.push(c);
+            continue;
+        }
+        let Some(escape) = chars.next() else {
+            plain.push(c);
+            break;
+        };
+        let decoded = match escape {
+            'u' | 'U' => {
+                let rest = chars.as_str();
+                let max = if escape == 'u' { 4 } else { 8 };
+                let n = rest
+                    .bytes()
+                    .take(max)
+                    .take_while(u8::is_ascii_hexdigit)
+                    .count();
+                let value = u32::from_str_radix(&rest[..n], 16).ok();
+                chars = rest[n..].chars();
+                Some(match value.and_then(char::from_u32) {
+                    Some(ch) => ch.to_string(),
+                    None => format!("\\{escape}{}", &rest[..n]),
+                })
+            }
+            'c' => match chars.next() {
+                Some(x) if x.is_ascii() => {
+                    // Bash reads `\c\\` as the control character of one `\`.
+                    if x == '\\' && chars.as_str().starts_with('\\') {
+                        chars.next();
+                    }
+                    Some(char::from(if x == '?' { 0x7f } else { x as u8 & 0x1f }).to_string())
+                }
+                Some(x) => Some(format!("\\c{x}")),
+                None => Some("\\c".to_string()),
+            },
+            _ => None,
+        };
+        match decoded {
+            Some(text) => {
+                flush(&mut out, &mut plain);
+                out.push_str(&text);
+            }
+            None => {
+                plain.push(c);
+                plain.push(escape);
+            }
+        }
+    }
+    flush(&mut out, &mut plain);
+    if let Some(nul) = out.find('\0') {
+        out.truncate(nul);
+    }
+    out
+}
+
+/// [`shell_split`] reading each word as bash passes it (see
+/// [`resolve_word_text`]), for the permission gate's deny and ask reading.
+pub(crate) fn shell_split_as_passed(input: &str) -> Vec<String> {
     coalesce_words(input, &tokenize(input))
         .into_iter()
         .map(|(raw, _)| resolve_word_text(raw, true))
@@ -2014,6 +2088,25 @@ mod tests {
             shell_split(r#"echo "a\$b" "a\"b" "a\\b" "a\nb""#),
             vec!["echo", "a$b", "a\"b", r"a\b", r"a\nb"]
         );
+    }
+
+    #[test]
+    fn test_shell_split_as_passed_decodes_as_bash() {
+        // Each expected word is what bash 5 passes.
+        for (input, word) in [
+            (r"$'a\0b'c", "ac"),
+            (r"$'a\c@b'c", "ac"),
+            (r"$'\cA'", "\u{1}"),
+            (r"$'a\c\\x'", "a\u{1c}x"),
+            (r"$'a\c'", r"a\c"),
+            (r"$'\u'", r"\u"),
+            (r"$'\u2dx'", "-x"),
+            (r"$'\u005cx66'", r"\x66"),
+            ("\"a\\\nb\"", "ab"),
+            ("'a\\\nb'", "a\\\nb"),
+        ] {
+            assert_eq!(shell_split_as_passed(input), vec![word], "{input:?}");
+        }
     }
 
     #[test]
