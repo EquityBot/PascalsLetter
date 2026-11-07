@@ -106,24 +106,32 @@ impl Iterator for QuoteScan<'_> {
     }
 }
 
-/// Only `\'` inside `$'…'` diverges: bash keeps the string open, the lexer
-/// closes it (#3188). Every operator past that point yields no token, so the
-/// whole line reads as one segment and whatever follows rides along unchecked.
+/// At `\'` inside `$'…'` bash keeps the string open where the lexer closes it
+/// (#3188). Every operator past that point yields no token, so the whole line
+/// reads as one segment and whatever follows rides along unchecked. Bash and
+/// zsh also pass different words for a `$'…'` holding `\c`, an escape that
+/// yields NUL or bytes that are not UTF-8, so no one reading of it is evidence.
 pub(crate) fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
-    let mut ansi_span = false;
+    // Where the body of the open `$'…'` starts.
+    let mut ansi_body = None;
     let mut backslash_run = 0u32;
     // The `$` must be one QuoteScan yielded: in `\$'...'` it was consumed as an
     // escape, so indexing the raw bytes would read a `$` that never opened a span.
     let mut prev_yielded = None;
-    for (_, b, in_single, in_double) in QuoteScan::new(cmd) {
+    for (i, b, in_single, in_double) in QuoteScan::new(cmd) {
         if b == b'\'' && !in_double {
             if !in_single {
-                ansi_span = prev_yielded == Some(b'$');
+                ansi_body = (prev_yielded == Some(b'$')).then_some(i + 1);
                 backslash_run = 0;
-            } else if ansi_span && backslash_run % 2 == 1 {
+            } else if let Some(start) = ansi_body.take()
+                && (backslash_run % 2 == 1 || ansi_c_shells_disagree(&cmd[start..i]))
+            {
                 return true;
             }
         } else if in_single {
+            if b == b'c' && backslash_run % 2 == 1 && ansi_body.is_some() {
+                return true;
+            }
             if b == b'\\' {
                 backslash_run += 1;
             } else {
@@ -132,7 +140,14 @@ pub(crate) fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
         }
         prev_yielded = Some(b);
     }
-    false
+    ansi_body.is_some_and(|start| ansi_c_shells_disagree(&cmd[start..]))
+}
+
+/// Bash ends a `$'…'` string at a NUL and zsh ends the whole word there, and
+/// bytes that are not UTF-8 have no reading here at all.
+fn ansi_c_shells_disagree(body: &str) -> bool {
+    let (text, decoded) = decode_ansi_c(body);
+    !decoded || text.contains('\0')
 }
 
 /// Inside double quotes, `${...}` and `$[...]` hold a quoting context of their
@@ -1223,7 +1238,9 @@ fn resolve_word_text(raw: &str, as_passed: bool) -> String {
             '$' if as_passed && quote.is_none() && chars.peek() == Some(&'\'') => {
                 chars.next();
                 let span: String = chars.by_ref().take_while(|&c| c != '\'').collect();
-                result.push_str(&decode_ansi_c(&span));
+                // Bash ends the string at its first NUL.
+                let (text, _) = decode_ansi_c(&span);
+                result.push_str(text.split('\0').next().unwrap_or_default());
             }
             '$' if as_passed && quote.is_none() && chars.peek() == Some(&'"') => {}
             '\\' if as_passed && quote != Some('\'') && chars.peek() == Some(&'\n') => {
@@ -1276,18 +1293,22 @@ pub fn shell_split(input: &str) -> Vec<String> {
 }
 
 /// Decodes the body of a `$'…'` string as bash does: [`decode_backslashes`]
-/// with ANSI-C escapes, plus `\uHHHH`, `\UHHHHHHHH` and `\cX`, and the string
-/// ends at its first NUL. Bash keeps `\u` and `\c` with nothing to decode as
-/// written.
-fn decode_ansi_c(span: &str) -> String {
+/// with ANSI-C escapes, plus `\uHHHH`, `\UHHHHHHHH` and `\cX`. Bash keeps `\u`
+/// and `\c` with nothing to decode as written. Also returns whether every
+/// escape decoded to UTF-8; one that did not is kept as written. A NUL stays
+/// in the text, since the shells end the word at different places.
+fn decode_ansi_c(span: &str) -> (String, bool) {
+    fn flush(out: &mut String, plain: &mut String) -> bool {
+        let text = decode_backslashes(plain, true);
+        out.push_str(text.as_deref().unwrap_or(plain));
+        plain.clear();
+        text.is_some()
+    }
     let mut out = String::new();
+    let mut decoded = true;
     // Text whose escapes decode_backslashes handles, decoded on the next flush
     // so a character decoded here is never decoded twice.
     let mut plain = String::new();
-    let flush = |out: &mut String, plain: &mut String| {
-        out.push_str(&decode_backslashes(plain, true).unwrap_or_else(|| plain.clone()));
-        plain.clear();
-    };
     let mut chars = span.chars();
     while let Some(c) = chars.next() {
         if c != '\\' {
@@ -1298,7 +1319,7 @@ fn decode_ansi_c(span: &str) -> String {
             plain.push(c);
             break;
         };
-        let decoded = match escape {
+        let special = match escape {
             'u' | 'U' => {
                 let rest = chars.as_str();
                 let max = if escape == 'u' { 4 } else { 8 };
@@ -1311,7 +1332,12 @@ fn decode_ansi_c(span: &str) -> String {
                 chars = rest[n..].chars();
                 Some(match value.and_then(char::from_u32) {
                     Some(ch) => ch.to_string(),
-                    None => format!("\\{escape}{}", &rest[..n]),
+                    None => {
+                        // Bash writes a surrogate or a value past U+10FFFF as
+                        // bytes that are not UTF-8.
+                        decoded &= n == 0;
+                        format!("\\{escape}{}", &rest[..n])
+                    }
                 })
             }
             'c' => match chars.next() {
@@ -1327,9 +1353,9 @@ fn decode_ansi_c(span: &str) -> String {
             },
             _ => None,
         };
-        match decoded {
+        match special {
             Some(text) => {
-                flush(&mut out, &mut plain);
+                decoded &= flush(&mut out, &mut plain);
                 out.push_str(&text);
             }
             None => {
@@ -1338,11 +1364,8 @@ fn decode_ansi_c(span: &str) -> String {
             }
         }
     }
-    flush(&mut out, &mut plain);
-    if let Some(nul) = out.find('\0') {
-        out.truncate(nul);
-    }
-    out
+    decoded &= flush(&mut out, &mut plain);
+    (out, decoded)
 }
 
 /// [`shell_split`] reading each word as bash passes it (see

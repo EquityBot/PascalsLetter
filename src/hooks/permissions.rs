@@ -1488,6 +1488,68 @@ mod tests {
     }
 
     #[test]
+    fn test_ansi_c_string_the_shells_read_differently_asks() {
+        let all = vec!["*".to_string()];
+        let rule = vec!["git push * --force".to_string()];
+        let allow = vec!["git push *".to_string()];
+        // The shells agree on these.
+        for cmd in [
+            r"git status $'\n'",
+            r"git status $'\t'",
+            r"git status $'\x2d-force'",
+            r"git status $'a\\c'",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &[], &all),
+                PermissionVerdict::Allow,
+                "{cmd:?}"
+            );
+        }
+        assert_eq!(
+            check_command_with_rules(r"git push origin $'\x2d-force'", &rule, &[], &allow),
+            PermissionVerdict::Deny
+        );
+        // Bash and zsh pass different words for a `$'…'` body holding `\c`, an
+        // escape that yields NUL or bytes that are not UTF-8.
+        for cmd in [
+            r"git status $'a\0'",
+            r"git status $'a\00b'",
+            r"git status $'a\000'",
+            r"git status $'a\x0'",
+            r"git status $'a\x00'",
+            r"git status $'a\u0'",
+            r"git status $'a\U0'",
+            r"git status $'a\cAb'",
+            r"git status $'a\xff'",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &[], &all),
+                PermissionVerdict::Ask,
+                "{cmd:?}"
+            );
+        }
+        // zsh ends the word at the NUL and reads `\c` as `c`; each passes
+        // `--force` in bash, zsh or both.
+        for cmd in [
+            r"git push origin $'\x2d-force\0\xff'",
+            r"git push origin $'\x2d-force\0\377'",
+            r"git push origin $'--force\0'x",
+            r"git push origin $'--for\ce'",
+        ] {
+            let verdict = check_command_with_rules(cmd, &rule, &[], &allow);
+            assert!(
+                matches!(verdict, PermissionVerdict::Ask | PermissionVerdict::Deny),
+                "{cmd:?}: {verdict:?}"
+            );
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &rule, &allow),
+                PermissionVerdict::Ask,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_restricting_rule_keeps_a_quoted_word_whole() {
         // Removing the quotes leaves one word; its spaces are no word boundary.
         let allow = vec!["*".to_string()];

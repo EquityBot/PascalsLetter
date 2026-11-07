@@ -788,6 +788,9 @@ mod tests {
             "git status $(rm -rf /tmp/x)",
             "git log --pretty=\"$(rm -rf /tmp/x)\"",
             "git log > /tmp/out.txt",
+            r"git status $'a\0'",
+            r"git status $'a\cAb'",
+            r"git status $'a\xff'",
         ] {
             assert_eq!(
                 decide_with_params(
