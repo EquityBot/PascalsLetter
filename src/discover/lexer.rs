@@ -110,8 +110,8 @@ impl Iterator for QuoteScan<'_> {
 /// (#3188). Every operator past that point yields no token, so the whole line
 /// reads as one segment and whatever follows rides along unchecked. Bash and
 /// zsh also pass different words for a `$'…'` holding `\c`, `\C` or `\M`, an
-/// escape that yields NUL or bytes that are not UTF-8, so no one reading of it
-/// is evidence.
+/// escape only bash keeps as written, or one that yields NUL or bytes that are
+/// not UTF-8, so no one reading of it is evidence.
 pub(crate) fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
     // Where the body of the open `$'…'` starts.
     let mut ansi_body = None;
@@ -145,8 +145,9 @@ pub(crate) fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
     ansi_body.is_some_and(|start| ansi_c_shells_disagree(&cmd[start..]))
 }
 
-/// Bash ends a `$'…'` string at a NUL and zsh ends the whole word there, and
-/// bytes that are not UTF-8 have no reading here at all.
+/// Bash ends a `$'…'` string at a NUL and zsh ends the whole word there, bytes
+/// that are not UTF-8 have no reading here at all, and the shells read some
+/// escapes differently (see [`decode_ansi_c`]).
 fn ansi_c_shells_disagree(body: &str) -> bool {
     let (text, decoded) = decode_ansi_c(body);
     !decoded || text.contains('\0')
@@ -1297,8 +1298,9 @@ pub fn shell_split(input: &str) -> Vec<String> {
 /// Decodes the body of a `$'…'` string as bash does: [`decode_backslashes`]
 /// with ANSI-C escapes, plus `\uHHHH`, `\UHHHHHHHH` and `\cX`. Bash keeps `\u`
 /// and `\c` with nothing to decode as written. Also returns whether every
-/// escape decoded to UTF-8; one that did not is kept as written. A NUL stays
-/// in the text, since the shells end the word at different places.
+/// escape decoded to UTF-8 and bash and zsh read it alike; the text of one
+/// that did not follows a single shell. A NUL stays in the text, since the
+/// shells end the word at different places.
 fn decode_ansi_c(span: &str) -> (String, bool) {
     fn flush(out: &mut String, plain: &mut String) -> bool {
         let text = decode_backslashes(plain, true);
@@ -1336,8 +1338,9 @@ fn decode_ansi_c(span: &str) -> (String, bool) {
                     Some(ch) => ch.to_string(),
                     None => {
                         // Bash writes a surrogate or a value past U+10FFFF as
-                        // bytes that are not UTF-8.
-                        decoded &= n == 0;
+                        // bytes that are not UTF-8, and keeps `\u` with no digit
+                        // as written, where zsh reads NUL.
+                        decoded = false;
                         format!("\\{escape}{}", &rest[..n])
                     }
                 })
@@ -1353,7 +1356,15 @@ fn decode_ansi_c(span: &str) -> (String, bool) {
                 Some(x) => Some(format!("\\c{x}")),
                 None => Some("\\c".to_string()),
             },
-            _ => None,
+            _ => {
+                // Bash keeps any other escape as written and zsh drops its
+                // backslash; `\x` with no digit bash keeps and zsh reads as NUL.
+                decoded &= match escape {
+                    'x' => chars.as_str().starts_with(|c: char| c.is_ascii_hexdigit()),
+                    _ => "abeEfnrtv\\'\"?01234567".contains(escape),
+                };
+                None
+            }
         };
         match special {
             Some(text) => {

@@ -1500,6 +1500,8 @@ mod tests {
             r"git status $'a\\c'",
             r"git status $'a\\C-e'",
             r"git status $'a\\M-e'",
+            r"git status $'\E'",
+            r#"git status $'\?\"'"#,
         ] {
             assert_eq!(
                 check_command_with_rules(cmd, &[], &[], &all),
@@ -1525,6 +1527,15 @@ mod tests {
             r"git status $'a\xff'",
             r"git status $'\C-e'",
             r"git status $'\M-e'",
+            // Bash keeps an escape it does not know as written, and `\x`, `\u`
+            // or `\U` with no digit; zsh drops the backslash or yields NUL.
+            r"git status $'a\q'",
+            r"git status $'a\8'",
+            r"git status $'a\ b'",
+            r"git status $'a\é'",
+            r"git status $'a\xg'",
+            r"git status $'a\ug'",
+            r"git status $'a\U'",
         ] {
             assert_eq!(
                 check_command_with_rules(cmd, &[], &[], &all),
@@ -1532,19 +1543,40 @@ mod tests {
                 "{cmd:?}"
             );
         }
-        // zsh ends the word at the NUL, reads `\c` as `c` and `\C-@` as NUL;
-        // each passes `--force` in bash, zsh or both.
+        // zsh ends the word at the NUL, reads `\c` as `c`, and `\C-@`, or `\u`
+        // or `\x` with no digit, as NUL; each passes `--force` in bash, zsh or both.
         for cmd in [
             r"git push origin $'\x2d-force\0\xff'",
             r"git push origin $'\x2d-force\0\377'",
             r"git push origin $'--force\0'x",
             r"git push origin $'--for\ce'",
             r"git push origin $'--force\C-@x'",
+            r"git push origin --force$'\u'",
+            r"git push origin --force$'\x'",
         ] {
             let verdict = check_command_with_rules(cmd, &rule, &[], &allow);
             assert!(
                 matches!(verdict, PermissionVerdict::Ask | PermissionVerdict::Deny),
                 "{cmd:?}: {verdict:?}"
+            );
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &rule, &allow),
+                PermissionVerdict::Ask,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ansi_c_upper_e_is_escape_for_deny_and_ask() {
+        // Both shells read `\E` in `$'…'` as ESC, as they read `\e`.
+        let rule = vec!["printf \u{1b}".to_string()];
+        let allow = vec!["printf *".to_string()];
+        for cmd in [r"printf $'\E'", r"printf $'\e'"] {
+            assert_eq!(
+                check_command_with_rules(cmd, &rule, &[], &allow),
+                PermissionVerdict::Deny,
+                "{cmd:?}"
             );
             assert_eq!(
                 check_command_with_rules(cmd, &[], &rule, &allow),

@@ -60,7 +60,7 @@ pub(crate) fn decode_backslashes(s: &str, ansi_c: bool) -> Option<String> {
             }
             b'a' => out.push(7),
             b'b' => out.push(8),
-            b'e' if ansi_c => out.push(27),
+            b'e' | b'E' if ansi_c => out.push(27),
             b'f' => out.push(12),
             b'n' => out.push(b'\n'),
             b'r' => out.push(b'\r'),
