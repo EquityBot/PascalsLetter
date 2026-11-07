@@ -2294,6 +2294,12 @@ mod tests {
             check_command_with_rules("((i++))\nls", &deny, &[], &allow),
             PermissionVerdict::Allow
         );
+        // Nested subshells written with `((` read as arithmetic to this check, so a
+        // quote inside them asks too: deliberately stricter.
+        assert_eq!(
+            check_command_with_rules("((cd a && ls 'q') )", &deny, &[], &allow),
+            PermissionVerdict::Ask
+        );
     }
 
     /// Every row reads as allowed under a reading that trusts what the lexer
