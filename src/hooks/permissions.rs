@@ -2086,6 +2086,26 @@ mod tests {
     }
 
     #[test]
+    fn test_unreadable_comment_hides_no_other_line() {
+        // A `#` the comment scan cannot place leaves the other comments blanked, so
+        // an apostrophe in one cannot hide the next line from the deny rule.
+        let allow = vec!["ls:*".to_string(), "echo:*".to_string()];
+        let deny = vec!["rm:*".to_string()];
+        for cmd in [
+            "ls # it's\nrm -rf x\necho `ls #`",
+            "ls # it's\nrm -rf x\nls ${x:-{} # n",
+            "ls (#i)ls # it's\nrm -rf x",
+            "ls # x\ry # it's\nrm -rf x",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &allow),
+                PermissionVerdict::Deny,
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_the_gate_takes_the_stricter_of_2_readings() {
         let deny = vec!["rm:*".to_string()];
         let allow = vec!["ls".to_string(), "echo".to_string(), "git".to_string()];

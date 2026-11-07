@@ -157,7 +157,7 @@ pub(crate) fn expansion_quote_defeats_lexer(cmd: &str) -> bool {
         }
         false
     }
-    scan(cmd) || blank_comments(cmd).is_some_and(|code| scan(&code))
+    scan(cmd) || scan(&blank_comments(cmd).code)
 }
 
 /// Bash's default `$IFS` is exactly space/tab/newline — not Rust's
@@ -511,15 +511,21 @@ fn flush_arg(tokens: &mut Vec<ParsedToken>, current: &mut String, offset: usize)
 /// after unquoted, unescaped whitespace or one of `; & | ( ) < >` — and the
 /// comment runs to the end of the line.
 ///
-/// `None` when this scan cannot say the `#` is a comment: right after `(` (zsh
-/// reads `(#i)` as a glob flag) or `)` (zsh reads `(a)#` as one glob word, so
-/// `ls (a)#; rm x` runs `rm`); inside backticks, `${...}` or
+/// The scan is `ambiguous` when it cannot say a `#` is a comment: right after
+/// `(` (zsh reads `(#i)` as a glob flag) or `)` (zsh reads `(a)#` as one glob
+/// word, so `ls (a)#; rm x` runs `rm`); inside backticks, `${...}` or
 /// `((...))`/`$((...))`, or after a heredoc `<<`, whose ends this scan does not
 /// reliably find; or a comment holding a lone `\r` (a line break to the
-/// conservative splitter, not to bash). Callers must not attest those.
-pub(crate) fn blank_comments(cmd: &str) -> Option<Cow<'_, str>> {
+/// conservative splitter, not to bash). Such a `#` is left as text, and a
+/// lone `\r` ends its comment, so what follows is still read; the other
+/// comments stay blanked, so their quotes hide no later line. Callers must not
+/// attest an ambiguous command.
+pub(crate) fn blank_comments(cmd: &str) -> CommentScan<'_> {
     if !cmd.contains('#') {
-        return Some(Cow::Borrowed(cmd));
+        return CommentScan {
+            code: Cow::Borrowed(cmd),
+            ambiguous: false,
+        };
     }
     let bytes = cmd.as_bytes();
     let mut out = String::with_capacity(cmd.len());
@@ -532,13 +538,20 @@ pub(crate) fn blank_comments(cmd: &str) -> Option<Cow<'_, str>> {
     let mut brace_depth = 0u32;
     let mut arith_depth = 0u32;
     let mut heredoc = false;
+    let mut ambiguous = false;
 
     for (i, c) in cmd.char_indices() {
         if in_comment {
             if c == '\n' || is_crlf_at(bytes, i) {
                 in_comment = false;
             } else if c == '\r' {
-                return None;
+                // Read as the conservative splitter reads it, a line break.
+                in_comment = false;
+                ambiguous = true;
+                out.push(c);
+                word_start = true;
+                prev = None;
+                continue;
             } else {
                 out.extend(std::iter::repeat_n(' ', c.len_utf8()));
                 continue;
@@ -571,10 +584,8 @@ pub(crate) fn blank_comments(cmd: &str) -> Option<Cow<'_, str>> {
 
         let blind = in_backtick || brace_depth > 0 || arith_depth > 0 || heredoc;
         match c {
+            '#' if word_start && (blind || matches!(prev, Some('(' | ')'))) => ambiguous = true,
             '#' if word_start => {
-                if blind || matches!(prev, Some('(' | ')')) {
-                    return None;
-                }
                 out.pop();
                 out.push(' ');
                 in_comment = true;
@@ -595,7 +606,19 @@ pub(crate) fn blank_comments(cmd: &str) -> Option<Cow<'_, str>> {
             is_word_boundary_whitespace(c) || matches!(c, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         prev = Some(c);
     }
-    Some(Cow::Owned(out))
+    CommentScan {
+        code: Cow::Owned(out),
+        ambiguous,
+    }
+}
+
+/// What [`blank_comments`] read.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct CommentScan<'a> {
+    /// The command with every comment the scan could place blanked to spaces.
+    pub(crate) code: Cow<'a, str>,
+    /// A `#` the scan could not place, so the command must not be attested.
+    pub(crate) ambiguous: bool,
 }
 
 /// Which grammar a command string is written in.
@@ -646,10 +669,11 @@ fn unattestable_under(cmd: &str, dialect: ShellDialect, blank: bool) -> bool {
     let code = if !blank || dialect == ShellDialect::Fish {
         Cow::Borrowed(cmd)
     } else {
-        let Some(code) = blank_comments(cmd) else {
+        let scan = blank_comments(cmd);
+        if scan.ambiguous {
             return true;
-        };
-        code
+        }
+        scan.code
     };
     if contains_substitution(&code) {
         return true;
@@ -826,11 +850,10 @@ pub(crate) fn unattestable_either_reading(cmd: &str, dialect: ShellDialect) -> b
 /// shells disagree about a `#` in it. The rewrite works from one reading alone, so
 /// such a command is left as written.
 pub(crate) fn comment_readings_disagree(cmd: &str) -> bool {
-    let Some(code) = blank_comments(cmd) else {
-        return true;
-    };
-    matches!(code, Cow::Owned(_))
-        && split_for_permissions(cmd) != split_for_permissions_as_code(cmd)
+    let scan = blank_comments(cmd);
+    scan.ambiguous
+        || (matches!(scan.code, Cow::Owned(_))
+            && split_for_permissions(cmd) != split_for_permissions_as_code(cmd))
 }
 
 /// True for a heredoc or here-string redirect (`<<`, `<<-`, `<<<`), with or
@@ -1013,14 +1036,14 @@ pub(crate) fn segment(cmd: &str, policy: Policy) -> Vec<Segment<'_>> {
     }
 
     // Tokens come from the comment-blanked text (same offsets); segments keep
-    // the original text. Where shells disagree about a `#`, the raw text is
-    // tokenized and `contains_unattestable_construct` refuses the command anyway.
+    // the original text. A `#` shells disagree about stays text there, and
+    // `contains_unattestable_construct` refuses the command anyway.
     let code = if policy.blank_comments {
-        blank_comments(trimmed)
+        blank_comments(trimmed).code
     } else {
-        Some(Cow::Borrowed(trimmed))
+        Cow::Borrowed(trimmed)
     };
-    let tokens = tokenize_inner(code.as_deref().unwrap_or(trimmed), policy.newline);
+    let tokens = tokenize_inner(&code, policy.newline);
     let mut out = Vec::new();
     let mut seg_start: usize = 0;
     let mut seg_end: Option<usize> = None;
@@ -2633,15 +2656,42 @@ mod tests {
             "ls <<EOF\n# n\nEOF",
             "ls (a)\\\n# n",
         ] {
-            assert_eq!(blank_comments(cmd), None, "{cmd:?}");
+            let scan = blank_comments(cmd);
+            assert!(scan.ambiguous, "{cmd:?}");
+            // The `#` stays text: the scan does not guess it is a comment.
+            assert_eq!(scan.code, cmd, "{cmd:?}");
             assert!(contains_unattestable_construct(cmd), "{cmd:?}");
         }
         // Text that only resembles those constructs leaves the comment a comment.
+        for (cmd, code) in [("ls $\\{{ #n", "ls $\\{{   "), ("ls ${x} #n", "ls ${x}   ")] {
+            assert_eq!(
+                blank_comments(cmd),
+                CommentScan {
+                    code: Cow::Borrowed(code),
+                    ambiguous: false
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn test_unplaced_hash_leaves_other_comments_blanked() {
+        // One `#` the scan cannot place no longer unblanks every comment, so an
+        // apostrophe in an earlier one hides no later line.
+        let scan = blank_comments("ls # it's\nrm -rf x\necho `ls #`");
+        assert!(scan.ambiguous);
         assert_eq!(
-            blank_comments("ls $\\{{ #n").as_deref(),
-            Some("ls $\\{{   ")
+            scan.code,
+            format!("ls{}\nrm -rf x\necho `ls #`", " ".repeat(7))
         );
-        assert_eq!(blank_comments("ls ${x} #n").as_deref(), Some("ls ${x}   "));
+        assert!(split_for_permissions("ls # it's\nrm -rf x\necho `ls #`").contains(&"rm -rf x"));
+        // A lone CR ends a comment as the conservative splitter reads it.
+        let scan = blank_comments("ls # x\r# it's\nrm -rf x");
+        assert!(scan.ambiguous);
+        assert_eq!(
+            scan.code,
+            format!("ls{}\r{}\nrm -rf x", " ".repeat(4), " ".repeat(6))
+        );
     }
 
     #[test]

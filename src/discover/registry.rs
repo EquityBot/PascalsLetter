@@ -859,8 +859,8 @@ fn collapse_continuations(
     if !s.contains('\\') {
         return std::borrow::Cow::Borrowed(s);
     }
-    // Where shells disagree about a `#` the raw text is read, and callers refuse it.
-    let code = track_comments.then(|| blank_comments(s)).flatten();
+    // A `#` shells disagree about stays text, and callers refuse the command.
+    let code = track_comments.then(|| blank_comments(s).code);
     let live = line_continuations(code.as_deref().unwrap_or(s), track_quotes);
     LINE_CONTINUATION_RE.replace_all(s, |caps: &regex::Captures<'_>| {
         let m = caps.get(0).expect("group 0 always matches");
