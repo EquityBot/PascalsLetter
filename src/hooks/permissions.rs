@@ -7,7 +7,7 @@ use crate::core::user_dirs;
 use crate::core::user_env;
 use crate::core::utils::strip_leading_bom;
 use crate::discover::lexer::{
-    ShellDialect, gate_segments, is_word_boundary_whitespace, split_for_wrappers,
+    ShellDialect, gate_segments, is_word_boundary_whitespace, shell_split, split_for_wrappers,
     split_for_wrappers_as_code, unattestable_either_reading,
 };
 use crate::discover::registry;
@@ -831,10 +831,16 @@ pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
 /// against the whole command, so `git push * --force` alone misses
 /// `git push origin --force # note` (whether Claude Code drops the comment is
 /// not documented) and `git push origin --force main`, and an allow rule such as
-/// `git push *` would then approve the force push. Deny and ask only: on allow
-/// this reading would approve more.
+/// `git push *` would then approve the force push. The words are also read with
+/// their quotes and escapes removed, as the shell passes them, so
+/// `git push origin "--force"` is a force push too. Deny and ask only: on allow
+/// these readings would approve more.
 fn restricting_rule_matches(cmd: &str, pattern: &str) -> bool {
-    command_matches_pattern(cmd, pattern) || command_matches_pattern(cmd, &format!("{pattern} *"))
+    let matches = |cmd: &str| {
+        command_matches_pattern(cmd, pattern)
+            || command_matches_pattern(cmd, &format!("{pattern} *"))
+    };
+    matches(cmd) || (cmd.contains(['\'', '"', '\\']) && matches(&shell_split(cmd).join(" ")))
 }
 
 /// Glob-style matching where `*` matches any character sequence (including empty).
@@ -1416,6 +1422,40 @@ mod tests {
         // Allow gets no extra reading.
         assert_eq!(
             check_command_with_rules("git push origin --force main", &[], &[], &rule),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_restricting_rule_reads_words_without_their_quotes() {
+        // Bash removes the quotes, so each of these runs `--force`.
+        let rule = vec!["git push * --force".to_string()];
+        let allow = vec!["git push *".to_string()];
+        for cmd in [
+            "git push origin \"--force\"",
+            "git push origin --force\"\"",
+            "git push origin '--force' # note",
+            "git push origin --\\force",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &rule, &[], &allow),
+                PermissionVerdict::Deny,
+                "{cmd:?}"
+            );
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &rule, &allow),
+                PermissionVerdict::Ask,
+                "{cmd:?}"
+            );
+        }
+        // Allow gets no extra reading.
+        assert_eq!(
+            check_command_with_rules(
+                "git push origin \"--force\"",
+                &[],
+                &[],
+                &["git push origin --force".to_string()]
+            ),
             PermissionVerdict::Default
         );
     }
@@ -2149,17 +2189,20 @@ mod tests {
                 );
             }
         }
-        for cmd in [
-            "ls # a; bash -c 'rm -rf y'",
-            "ls # a; bash -c \\\n'rm -rf y'",
-            "bash -c 'ls # a; rm -rf y'",
-        ] {
+        for cmd in ["ls # a; bash -c 'rm -rf y'", "bash -c 'ls # a; rm -rf y'"] {
             assert_eq!(
                 check_command_with_rules(cmd, &deny, &[], &allow_all),
                 PermissionVerdict::Defer,
                 "{cmd:?}"
             );
         }
+        // Where the comment ends at the newline, the next line is the one word
+        // `'rm -rf y'`; read without its quotes it is the command the deny rule
+        // names, so the verdict is the stricter `Deny`.
+        assert_eq!(
+            check_command_with_rules("ls # a; bash -c \\\n'rm -rf y'", &deny, &[], &allow_all),
+            PermissionVerdict::Deny
+        );
         assert_eq!(
             check_command_with_rules("git status # `id`", &[], &[], &allow_all),
             PermissionVerdict::Ask
