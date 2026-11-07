@@ -139,14 +139,26 @@ pub(crate) fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
 /// outer one, and what a `'` does depends on the operator. The lexer models
 /// neither, so its quote state is no evidence once one appears. An unquoted
 /// `$[...]` too: zsh reads its body as double-quoted text, so `$[##']` closes
-/// where the lexer opens a string. Either comment reading of `cmd` is enough.
+/// where the lexer opens a string. zsh reads `((...))` the same way, so a quote
+/// inside one is no evidence either. Either comment reading of `cmd` is enough.
 pub(crate) fn expansion_quote_defeats_lexer(cmd: &str) -> bool {
     fn scan(text: &str) -> bool {
         let mut depth = 0u32;
+        // Parentheses open since an unquoted `((`, the pair included.
+        let mut arith = 0u32;
         let mut prev_yielded = None;
         for (_, b, in_single, in_double) in QuoteScan::new(text) {
             if b == b'[' && prev_yielded == Some(b'$') && !in_single {
                 return true;
+            }
+            if !in_single && !in_double {
+                match b {
+                    b'"' | b'\'' if arith > 0 => return true,
+                    b'(' if arith > 0 => arith += 1,
+                    b'(' if prev_yielded == Some(b'(') => arith = 2,
+                    b')' if arith > 0 => arith -= 1,
+                    _ => {}
+                }
             }
             if in_double {
                 match b {

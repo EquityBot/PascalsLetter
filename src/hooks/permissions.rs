@@ -2202,6 +2202,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_quote_inside_an_arithmetic_command_asks() {
+        // zsh reads `((…))` as it reads `$[…]`, so these run `rm -rf y`.
+        let allow = vec!["*".to_string()];
+        let deny = vec!["rm:*".to_string()];
+        for cmd in [
+            "((x=##'))\nrm -rf y\n#'",
+            "for ((i=##';i<40;i++)); do :; done\nrm -rf y\n#'",
+            "ls; ((x=##'))\nrm -rf y\n#'",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &allow),
+                PermissionVerdict::Ask,
+                "{cmd:?}"
+            );
+        }
+        // Arithmetic without a quote is read as before.
+        assert_eq!(
+            check_command_with_rules("((i++))\nls", &deny, &[], &allow),
+            PermissionVerdict::Allow
+        );
+    }
+
     /// Every row reads as allowed under a reading that trusts what the lexer
     /// tracks, and the shell runs the last line of each.
     #[test]
