@@ -1,3 +1,4 @@
+use crate::core::utils::decode_backslashes;
 use std::borrow::Cow;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1208,14 +1209,22 @@ pub fn strip_quotes(s: &str) -> String {
 
 /// Turns a coalesced word's raw text (quotes/escapes still literal, as
 /// `tokenize()` preserves them) into argv-ready text: quote chars that
-/// open/close a span are stripped, backslash escapes resolved.
-fn resolve_word_text(raw: &str) -> String {
+/// open/close a span are stripped, backslash escapes resolved. With
+/// `dollar_quotes`, an unquoted `$'…'` is decoded as bash decodes it and the
+/// `$` of an unquoted `$"…"` is dropped.
+fn resolve_word_text(raw: &str, dollar_quotes: bool) -> String {
     let mut result = String::new();
     let mut chars = raw.chars().peekable();
     let mut quote: Option<char> = None;
 
     while let Some(c) = chars.next() {
         match c {
+            '$' if dollar_quotes && quote.is_none() && chars.peek() == Some(&'\'') => {
+                chars.next();
+                let span: String = chars.by_ref().take_while(|&c| c != '\'').collect();
+                result.push_str(&decode_backslashes(&span, true).unwrap_or(span));
+            }
+            '$' if dollar_quotes && quote.is_none() && chars.peek() == Some(&'"') => {}
             // Inside double quotes bash only lets `\` escape `$`, `` ` ``, `"`,
             // `\` or a newline; before anything else it is a literal character.
             // That is what keeps a quoted Windows path (`"C:\Program Files"`)
@@ -1258,7 +1267,16 @@ fn resolve_word_text(raw: &str) -> String {
 pub fn shell_split(input: &str) -> Vec<String> {
     coalesce_words(input, &tokenize(input))
         .into_iter()
-        .map(|(raw, _)| resolve_word_text(raw))
+        .map(|(raw, _)| resolve_word_text(raw, false))
+        .collect()
+}
+
+/// [`shell_split`] with `$'…'` decoded and the `$` of `$"…"` dropped, as bash
+/// passes those words, for the permission gate's deny and ask reading.
+pub(crate) fn shell_split_decoding_dollar_quotes(input: &str) -> Vec<String> {
+    coalesce_words(input, &tokenize(input))
+        .into_iter()
+        .map(|(raw, _)| resolve_word_text(raw, true))
         .collect()
 }
 

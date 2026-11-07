@@ -7,8 +7,8 @@ use crate::core::user_dirs;
 use crate::core::user_env;
 use crate::core::utils::strip_leading_bom;
 use crate::discover::lexer::{
-    ShellDialect, gate_segments, is_word_boundary_whitespace, shell_split, split_for_wrappers,
-    split_for_wrappers_as_code, unattestable_either_reading,
+    ShellDialect, gate_segments, is_word_boundary_whitespace, shell_split_decoding_dollar_quotes,
+    split_for_wrappers, split_for_wrappers_as_code, unattestable_either_reading,
 };
 use crate::discover::registry;
 #[cfg(test)]
@@ -832,15 +832,25 @@ pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
 /// `git push origin --force # note` (whether Claude Code drops the comment is
 /// not documented) and `git push origin --force main`, and an allow rule such as
 /// `git push *` would then approve the force push. The words are also read with
-/// their quotes and escapes removed, as the shell passes them, so
-/// `git push origin "--force"` is a force push too. Deny and ask only: on allow
-/// these readings would approve more.
+/// their quoting removed, as the shell passes them, so `git push origin "--force"`
+/// and `git push origin $'--force'` are force pushes too. Whitespace inside one of
+/// those words becomes U+0001, which is no word boundary, so the text of a quoted
+/// argument (`git commit -m 'never use --force'`) is not read as words. Deny and
+/// ask only: on allow these readings would approve more.
 fn restricting_rule_matches(cmd: &str, pattern: &str) -> bool {
     let matches = |cmd: &str| {
         command_matches_pattern(cmd, pattern)
             || command_matches_pattern(cmd, &format!("{pattern} *"))
     };
-    matches(cmd) || (cmd.contains(['\'', '"', '\\']) && matches(&shell_split(cmd).join(" ")))
+    matches(cmd)
+        || (cmd.contains(['\'', '"', '\\'])
+            && matches(
+                &shell_split_decoding_dollar_quotes(cmd)
+                    .iter()
+                    .map(|word| word.replace(is_word_boundary_whitespace, "\u{1}"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ))
 }
 
 /// Glob-style matching where `*` matches any character sequence (including empty).
@@ -1436,6 +1446,10 @@ mod tests {
             "git push origin --force\"\"",
             "git push origin '--force' # note",
             "git push origin --\\force",
+            // ANSI-C quoting is decoded, and `$"…"` is a plain string here.
+            "git push origin $'--force'",
+            "git push origin $'--\\x66orce'",
+            "git push origin $\"--force\"",
         ] {
             assert_eq!(
                 check_command_with_rules(cmd, &rule, &[], &allow),
@@ -1458,6 +1472,23 @@ mod tests {
             ),
             PermissionVerdict::Default
         );
+    }
+
+    #[test]
+    fn test_restricting_rule_keeps_a_quoted_word_whole() {
+        // Removing the quotes leaves one word; its spaces are no word boundary.
+        let allow = vec!["*".to_string()];
+        for (rule, cmd) in [
+            ("* --force", "git commit -m 'never use --force'"),
+            ("* main", "git log 'feature main'"),
+        ] {
+            let rule = vec![rule.to_string()];
+            assert_eq!(
+                check_command_with_rules(cmd, &rule, &[], &allow),
+                PermissionVerdict::Allow,
+                "{cmd:?}"
+            );
+        }
     }
 
     // Integration: deny *:* blocks everything
@@ -2189,20 +2220,17 @@ mod tests {
                 );
             }
         }
-        for cmd in ["ls # a; bash -c 'rm -rf y'", "bash -c 'ls # a; rm -rf y'"] {
+        for cmd in [
+            "ls # a; bash -c 'rm -rf y'",
+            "ls # a; bash -c \\\n'rm -rf y'",
+            "bash -c 'ls # a; rm -rf y'",
+        ] {
             assert_eq!(
                 check_command_with_rules(cmd, &deny, &[], &allow_all),
                 PermissionVerdict::Defer,
                 "{cmd:?}"
             );
         }
-        // Where the comment ends at the newline, the next line is the one word
-        // `'rm -rf y'`; read without its quotes it is the command the deny rule
-        // names, so the verdict is the stricter `Deny`.
-        assert_eq!(
-            check_command_with_rules("ls # a; bash -c \\\n'rm -rf y'", &deny, &[], &allow_all),
-            PermissionVerdict::Deny
-        );
         assert_eq!(
             check_command_with_rules("git status # `id`", &[], &[], &allow_all),
             PermissionVerdict::Ask

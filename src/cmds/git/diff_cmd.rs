@@ -3,6 +3,7 @@
 use crate::core::guard::never_worse;
 use crate::core::shell::display_args;
 use crate::core::tracking;
+use crate::core::utils::decode_backslashes;
 use anyhow::{Context, Result};
 use regex::Regex;
 use std::collections::HashSet;
@@ -1718,61 +1719,6 @@ fn shell_word_len(s: &str) -> Option<usize> {
             return Some(i);
         }
     }
-}
-
-/// Decode backslash escapes into bytes: `\ooo` (1–3 octal digits), `\xHH`
-/// (ANSI-C only), `\a \b \e \f \n \r \t \v`, and `\<c>` for any other `<c>`
-/// (`\"`, `\'`, `\\`). `None` when the bytes are not UTF-8 — the caller
-/// keeps the producer's own spelling then, which is lossless.
-fn decode_backslashes(s: &str, ansi_c: bool) -> Option<String> {
-    let b = s.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] != b'\\' || i + 1 >= b.len() {
-            out.push(b[i]);
-            i += 1;
-            continue;
-        }
-        let c = b[i + 1];
-        i += 2;
-        match c {
-            b'0'..=b'7' => {
-                let mut v = (c - b'0') as u32;
-                let mut n = 1;
-                while n < 3 && i < b.len() && (b'0'..=b'7').contains(&b[i]) {
-                    v = v * 8 + (b[i] - b'0') as u32;
-                    i += 1;
-                    n += 1;
-                }
-                out.push(v as u8);
-            }
-            b'x' if ansi_c => {
-                let mut v = 0u32;
-                let mut n = 0;
-                while n < 2 && i < b.len() && (b[i] as char).is_ascii_hexdigit() {
-                    v = v * 16 + (b[i] as char).to_digit(16).unwrap_or(0);
-                    i += 1;
-                    n += 1;
-                }
-                if n == 0 {
-                    out.extend_from_slice(b"\\x");
-                } else {
-                    out.push(v as u8);
-                }
-            }
-            b'a' => out.push(7),
-            b'b' => out.push(8),
-            b'e' if ansi_c => out.push(27),
-            b'f' => out.push(12),
-            b'n' => out.push(b'\n'),
-            b'r' => out.push(b'\r'),
-            b't' => out.push(b'\t'),
-            b'v' => out.push(11),
-            other => out.push(other),
-        }
-    }
-    String::from_utf8(out).ok()
 }
 
 /// Name a section from its `---`/`+++` pair (already timestamp-stripped and
