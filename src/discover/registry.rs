@@ -827,8 +827,9 @@ fn line_continuation_quoting_unknown(s: &str) -> bool {
 /// goes. Inside single quotes, after a backslash that escapes this one
 /// (`\\<NL>`) or in a comment, which the newline ends whatever comes before it,
 /// it is no continuation and stays as written. A `\<CR><NL>`, which bash does
-/// not continue, still becomes a single space outside those places, as it
-/// always has. Returns a borrowed `&str` when the input contains
+/// not continue, still becomes a single space outside those places, so
+/// [`rewrite_command`] leaves a command holding one as written rather than call
+/// this. Returns a borrowed `&str` when the input contains
 /// no continuations, so the common fast path allocates nothing.
 pub(crate) fn collapse_line_continuations(s: &str) -> std::borrow::Cow<'_, str> {
     collapse_continuations(s, true, true)
@@ -950,9 +951,18 @@ pub(crate) fn rewrite_command_precompiled(
         if line_continuation_quoting_unknown(cmd) {
             return None;
         }
+        // Bash does not continue a line at `\<CR><NL>`: the backslash escapes the
+        // CR and the newline ends the command. The join below would merge the lines.
+        let code = blank_comments(cmd).code;
+        if line_continuations(&code, true)
+            .iter()
+            .any(|c| is_crlf_at(code.as_bytes(), c.at + 1))
+        {
+            return None;
+        }
     }
 
-    // Bash line continuations (`\<NL>`, `\<CRLF>`) and the leading whitespace that
+    // Bash line continuations (`\<NL>`) and the leading whitespace that
     // follows are syntactically equivalent to a single space, but `cmd.trim()` does
     // not unwrap them so a leading backslash-newline used to defeat the whole matcher.
     // Normalize first, then trim. See issue #1564.
@@ -8672,11 +8682,26 @@ mod tests {
 
     #[test]
     fn test_rewrite_leading_backslash_crlf() {
-        // CRLF line ending — same shape, Windows shells / Git Bash.
+        // CRLF line ending: bash does not continue the line there. The backslash
+        // escapes the CR, which runs as a command of its own before `git diff`, so
+        // a rewrite that joined the lines would drop it.
         assert_eq!(
             rewrite_command_no_prefixes("\\\r\ngit diff HEAD~1", &[]),
-            Some("rtk git diff HEAD~1".into())
+            None
         );
+    }
+
+    #[test]
+    fn test_backslash_before_crlf_is_no_continuation() {
+        // `git\<CR><NL>status` runs `git<CR>` and then `status`; joined, the
+        // rewrite would run `git status` instead and drop the second line.
+        for cmd in [
+            "git\\\r\nstatus",
+            "git status \\\r\n  --short",
+            "ls # it's\ngit \\\r\n  diff",
+        ] {
+            assert_eq!(rewrite_command_no_prefixes(cmd, &[]), None, "{cmd:?}");
+        }
     }
 
     #[test]
