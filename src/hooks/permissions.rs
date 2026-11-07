@@ -280,10 +280,10 @@ fn gate_verdict(
         .collect();
     let matches_any = |segment: &str, peeled: &Option<MatchingReadings<'_>>, pattern: &str| {
         let readings = peeled.iter().flat_map(|peeled| peeled.readings.iter());
-        command_matches_pattern(segment, pattern)
+        restricting_rule_matches(segment, pattern)
             || readings
                 .filter(|reading| **reading != segment)
-                .any(|reading| command_matches_pattern(reading, pattern))
+                .any(|reading| restricting_rule_matches(reading, pattern))
     };
 
     // Deny takes highest priority and pre-empts every other construct.
@@ -391,7 +391,7 @@ fn check_shell_wrapper_permissions(
                     .any(|reading| {
                         deny_rules
                             .iter()
-                            .any(|pattern| command_matches_pattern(reading, pattern))
+                            .any(|pattern| restricting_rule_matches(reading, pattern))
                     })
             });
             if inner_denied {
@@ -824,6 +824,17 @@ pub(crate) fn command_matches_pattern(cmd: &str, pattern: &str) -> bool {
 
     // 4. No wildcard: exact match or prefix with word boundary
     cmd == pattern || cmd.starts_with(&format!("{} ", pattern))
+}
+
+/// A deny or ask rule's match: the rule as written, or the rule followed by more
+/// words, as a rule without a wildcard already is. Claude Code matches a rule
+/// against the whole command, so `git push * --force` alone misses
+/// `git push origin --force # note` (whether Claude Code drops the comment is
+/// not documented) and `git push origin --force main`, and an allow rule such as
+/// `git push *` would then approve the force push. Deny and ask only: on allow
+/// this reading would approve more.
+fn restricting_rule_matches(cmd: &str, pattern: &str) -> bool {
+    command_matches_pattern(cmd, pattern) || command_matches_pattern(cmd, &format!("{pattern} *"))
 }
 
 /// Glob-style matching where `*` matches any character sequence (including empty).
@@ -1364,6 +1375,47 @@ mod tests {
         );
         assert_eq!(
             check_command_with_rules("git push", &deny, &[], &[]),
+            PermissionVerdict::Default
+        );
+    }
+
+    #[test]
+    fn test_restricting_rule_with_a_literal_after_a_wildcard_survives_trailing_text() {
+        // A rule naming a force push still names it with a comment or another
+        // argument behind the flag, so the allow rule cannot approve it.
+        let rule = vec!["git push * --force".to_string()];
+        let allow = vec!["git push *".to_string()];
+        for cmd in [
+            "git push origin --force # note",
+            "git push origin --force main",
+        ] {
+            assert_eq!(
+                check_command_with_rules(cmd, &rule, &[], &allow),
+                PermissionVerdict::Deny,
+                "{cmd:?}"
+            );
+            assert_eq!(
+                check_command_with_rules(cmd, &[], &rule, &allow),
+                PermissionVerdict::Ask,
+                "{cmd:?}"
+            );
+        }
+        assert_eq!(
+            check_command_with_rules(
+                "bash -c 'git push origin --force # note'",
+                &rule,
+                &[],
+                &allow
+            ),
+            PermissionVerdict::Defer
+        );
+        assert_eq!(
+            check_command_with_rules("git push origin --forceful", &rule, &[], &allow),
+            PermissionVerdict::Allow
+        );
+        // Allow gets no extra reading.
+        assert_eq!(
+            check_command_with_rules("git push origin --force main", &[], &[], &rule),
             PermissionVerdict::Default
         );
     }
