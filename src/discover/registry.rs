@@ -410,9 +410,11 @@ fn normalize_php_tool_word<'a>(word: &str, bin_dirs: &'a [std::path::PathBuf]) -
     // reducing it to the bare tool would run the current project's copy. A redirect or
     // operator inside the word (`a/>o/vendor/bin/pint` runs `a/` with stdout to a file)
     // would be dropped with the path, and `#a/vendor/bin/pint` (a comment) or
-    // `X=a/vendor/bin/pint` (an assignment) runs nothing at all.
+    // `X=a/vendor/bin/pint` (an assignment) runs nothing at all. A quote would be
+    // dropped too, freeing what it held: `'a/vendor/bin/pint && ls'` is one word.
     if word.contains([
         '$', '`', '~', '*', '?', '[', '!', '(', ')', '{', '}', '<', '>', '&', '|', ';', '#', '=',
+        '\'', '"',
     ]) {
         return None;
     }
@@ -8946,6 +8948,27 @@ mod tests {
             ("X=a/vendor/bin/pint", "X=a/vendor/bin/pint"),
             ("~/tools/vendor/bin/pint --test", "~/tools/vendor/bin/pint"),
             ("*/vendor/bin/phpunit tests/", "*/vendor/bin/phpunit"),
+        ] {
+            if let Some(out) = rewrite_command_no_prefixes(cmd, &[]) {
+                assert!(out.contains(path), "{cmd:?} -> {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_php_tool_path_with_quotes_is_not_rewritten() {
+        // Found by fuzz/fuzz_targets/rewrite.rs: the quote went with the path, so an
+        // unclosed `'` no longer hid the `;` after it, and quoted text ran as the tool.
+        for (cmd, path) in [
+            (
+                "gt  \u{686}`;/`;'\0/vendor/bin/pint  \u{686} s ;",
+                "'\0/vendor/bin/pint",
+            ),
+            ("'a'/vendor/bin/pint --test", "'a'/vendor/bin/pint"),
+            (
+                "\"a\"/vendor/bin/phpunit tests/",
+                "\"a\"/vendor/bin/phpunit",
+            ),
         ] {
             if let Some(out) = rewrite_command_no_prefixes(cmd, &[]) {
                 assert!(out.contains(path), "{cmd:?} -> {out:?}");
