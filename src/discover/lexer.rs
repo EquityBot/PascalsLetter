@@ -137,17 +137,20 @@ pub(crate) fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
 /// Inside double quotes, `${...}` and `$[...]` hold a quoting context of their
 /// own: the shell opens a nested string at a `"` where the lexer closes the
 /// outer one, and what a `'` does depends on the operator. The lexer models
-/// neither, so its quote state is no evidence once one appears. Either comment
-/// reading of `cmd` is enough.
+/// neither, so its quote state is no evidence once one appears. An unquoted
+/// `$[...]` too: zsh reads its body as double-quoted text, so `$[##']` closes
+/// where the lexer opens a string. Either comment reading of `cmd` is enough.
 pub(crate) fn expansion_quote_defeats_lexer(cmd: &str) -> bool {
     fn scan(text: &str) -> bool {
         let mut depth = 0u32;
         let mut prev_yielded = None;
-        for (_, b, _, in_double) in QuoteScan::new(text) {
+        for (_, b, in_single, in_double) in QuoteScan::new(text) {
+            if b == b'[' && prev_yielded == Some(b'$') && !in_single {
+                return true;
+            }
             if in_double {
                 match b {
                     b'"' | b'\'' if depth > 0 => return true,
-                    b'[' if prev_yielded == Some(b'$') => return true,
                     b'{' if prev_yielded == Some(b'$') => depth += 1,
                     b'}' if depth > 0 => depth -= 1,
                     _ => {}

@@ -2169,6 +2169,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_quote_inside_an_unquoted_dollar_bracket_asks() {
+        // zsh reads `$[…]` as double-quoted text, so `##'` is the code of `'` and
+        // zsh runs `rm -rf y`; the lexer reads a `'` that hides the line.
+        let allow = vec!["*".to_string()];
+        let deny = vec!["rm:*".to_string()];
+        for cmd in ["ls $[##']\nrm -rf y\n#'", "ls $[ 1 ]$[##']\nrm -rf y\n#'"] {
+            assert_eq!(
+                check_command_with_rules(cmd, &deny, &[], &allow),
+                PermissionVerdict::Ask,
+                "{cmd:?}"
+            );
+        }
+    }
+
     /// Every row reads as allowed under a reading that trusts what the lexer
     /// tracks, and the shell runs the last line of each.
     #[test]
