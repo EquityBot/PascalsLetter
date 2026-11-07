@@ -109,8 +109,9 @@ impl Iterator for QuoteScan<'_> {
 /// At `\'` inside `$'…'` bash keeps the string open where the lexer closes it
 /// (#3188). Every operator past that point yields no token, so the whole line
 /// reads as one segment and whatever follows rides along unchecked. Bash and
-/// zsh also pass different words for a `$'…'` holding `\c`, an escape that
-/// yields NUL or bytes that are not UTF-8, so no one reading of it is evidence.
+/// zsh also pass different words for a `$'…'` holding `\c`, `\C` or `\M`, an
+/// escape that yields NUL or bytes that are not UTF-8, so no one reading of it
+/// is evidence.
 pub(crate) fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
     // Where the body of the open `$'…'` starts.
     let mut ansi_body = None;
@@ -129,7 +130,8 @@ pub(crate) fn ansi_c_quote_defeats_lexer(cmd: &str) -> bool {
                 return true;
             }
         } else if in_single {
-            if b == b'c' && backslash_run % 2 == 1 && ansi_body.is_some() {
+            // zsh also decodes `\C-x` and `\M-x`, which bash keeps as written.
+            if matches!(b, b'c' | b'C' | b'M') && backslash_run % 2 == 1 && ansi_body.is_some() {
                 return true;
             }
             if b == b'\\' {

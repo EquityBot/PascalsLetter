@@ -1498,6 +1498,8 @@ mod tests {
             r"git status $'\t'",
             r"git status $'\x2d-force'",
             r"git status $'a\\c'",
+            r"git status $'a\\C-e'",
+            r"git status $'a\\M-e'",
         ] {
             assert_eq!(
                 check_command_with_rules(cmd, &[], &[], &all),
@@ -1521,6 +1523,8 @@ mod tests {
             r"git status $'a\U0'",
             r"git status $'a\cAb'",
             r"git status $'a\xff'",
+            r"git status $'\C-e'",
+            r"git status $'\M-e'",
         ] {
             assert_eq!(
                 check_command_with_rules(cmd, &[], &[], &all),
@@ -1528,13 +1532,14 @@ mod tests {
                 "{cmd:?}"
             );
         }
-        // zsh ends the word at the NUL and reads `\c` as `c`; each passes
-        // `--force` in bash, zsh or both.
+        // zsh ends the word at the NUL, reads `\c` as `c` and `\C-@` as NUL;
+        // each passes `--force` in bash, zsh or both.
         for cmd in [
             r"git push origin $'\x2d-force\0\xff'",
             r"git push origin $'\x2d-force\0\377'",
             r"git push origin $'--force\0'x",
             r"git push origin $'--for\ce'",
+            r"git push origin $'--force\C-@x'",
         ] {
             let verdict = check_command_with_rules(cmd, &rule, &[], &allow);
             assert!(
